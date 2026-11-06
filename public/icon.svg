@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a" />
+      <stop offset="55%" stop-color="#0c4a6e" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+    <linearGradient id="shieldGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="112" fill="url(#bgGrad)" />
+  <path
+    d="M256 76 L404 134 V248 C404 345 340 416 256 446 C172 416 108 345 108 248 V134 Z"
+    fill="#0f172a"
+    fill-opacity="0.72"
+    stroke="url(#shieldGrad)"
+    stroke-width="20"
+    stroke-linejoin="round"
+  />
+  <path
+    d="M256 112 L372 158 V246 C372 324 321 382 256 408 C191 382 140 324 140 246 V158 Z"
+    fill="url(#shieldGrad)"
+    fill-opacity="0.16"
+  />
+  <path
+    d="M202 258 L240 296 L316 214"
+    fill="none"
+    stroke="#38bdf8"
+    stroke-width="30"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>

@@ -1,0 +1,237 @@
+import {
+  ChatSourceType,
+  EnforcementStatus,
+  ThreatCategory,
+  type BotPolicyConfig,
+  type ThreatEvent,
+} from '../types/security';
+import { localMlEngine } from './localMlEngine';
+
+export const DEFAULT_BOT_POLICY: BotPolicyConfig = {
+  botToken: '',
+  botUsername: '',
+  botFirstName: '',
+  botId: null,
+  connected: false,
+  livePollingEnabled: false,
+  personalWarningChatId: '',
+  autoPersonalWarningOnThreat: true,
+  autoReplyInGroupChats: false,
+  autoDeleteCriticalInGroups: false,
+  e2eeRedactPreviewInWarnings: false,
+  browserNotificationsEnabled: false,
+  soundAlertEnabled: true,
+  onlyScamAndVirusFiles: true,
+  riskThreshold: 50,
+};
+
+export const THREAT_TEST_SCENARIOS = [
+  {
+    label: 'Double-Extension Invoice.pdf.exe',
+    chatTitle: 'Direct Message',
+    chatType: ChatSourceType.Private,
+    senderName: 'Vendor Billing',
+    senderUsername: '@username',
+    text: 'Please review and settle the attached overdue payment invoice today.',
+    attachment: {
+      fileName: 'Invoice.pdf.exe',
+      mimeType: 'application/x-msdownload',
+      fileSize: 2184960,
+      headerHexOverride: '4D5A9000030000000400',
+    },
+  },
+  {
+    label: 'Premium Keygen Activator (.msi)',
+    chatTitle: 'Software & Tools Group',
+    chatType: ChatSourceType.Supergroup,
+    senderName: 'Free Drop Bot',
+    senderUsername: '@free_crack_drop',
+    text: 'Download free Telegram Premium keygen activator — instant unlock!',
+    attachment: {
+      fileName: 'Telegram_Premium_Keygen_Activator.msi',
+      mimeType: 'application/x-msi',
+      fileSize: 5412800,
+      headerHexOverride: 'D0CF11E0A1B11AE10000',
+    },
+  },
+  {
+    label: 'TON Wallet Phishing Link',
+    chatTitle: 'TON Builders Supergroup',
+    chatType: ChatSourceType.Supergroup,
+    senderName: 'TON Official Distribution',
+    senderUsername: '@ton_drop_support99',
+    text: 'Claim your official TON Keeper 500 TON reward allocation before snapshot closes! Connect wallet seed phrase now: https://tonkeeper-airdrop-claim.top/connect',
+    attachment: null,
+  },
+  {
+    label: 'Spoofed Android Wallet APK',
+    chatTitle: 'Crypto Airdrop Hunters',
+    chatType: ChatSourceType.Supergroup,
+    senderName: 'Airdrop Claim Support',
+    senderUsername: '@crypto_bonus_apk',
+    text: 'Install the official crypto wallet bonus claimer APK to receive your free seed allocation.',
+    attachment: {
+      fileName: 'Crypto_Wallet_Bonus_Airdrop.apk',
+      mimeType: 'application/vnd.android.package-archive',
+      fileSize: 4821900,
+      headerHexOverride: '504B0304140008080800',
+    },
+  },
+  {
+    label: 'Telegram OTP Hijack Attempt',
+    chatTitle: 'Security Notice',
+    chatType: ChatSourceType.Private,
+    senderName: 'Telegram Verification',
+    senderUsername: '@tg_verify_desk',
+    text: 'URGENT: Your Telegram account will be terminated in 24 hours due to suspicious login. Verify session and 5-digit SMS login code at https://telegram-security-verify.xyz/auth',
+    attachment: null,
+  },
+];
+
+export async function generateInitialBaselineEvents(): Promise<ThreatEvent[]> {
+  const now = Date.now();
+  const hour = 3600 * 1000;
+
+  const rawSeeds = [
+    {
+      id: 'evt-seed-1',
+      offsetMs: 18 * 60 * 1000,
+      chatId: '-10019482011',
+      chatTitle: 'DeFi & Layer2 Developers',
+      chatType: ChatSourceType.Supergroup,
+      senderName: 'MetaMask Alert Desk',
+      senderUsername: '@mm_sync_bot_help',
+      text: 'MetaMask Security Notice: Smart contract approval required to prevent wallet freeze. Validate recovery phrase at http://metamask-restore-node.cfd/sync',
+      attachment: null,
+      enforcement: EnforcementStatus.Quarantined,
+      personalWarningSent: true,
+    },
+    {
+      id: 'evt-seed-2',
+      offsetMs: 2.4 * hour,
+      chatId: '749201842',
+      chatTitle: 'Direct Message',
+      chatType: ChatSourceType.Private,
+      senderName: 'DHL Express Customs',
+      senderUsername: '@dhl_parcel_clearance',
+      text: 'Your international parcel is held at customs. Open the attached shipping invoice executable to confirm delivery address.',
+      attachment: {
+        fileName: 'DHL_Customs_Invoice\u202Efdp.exe',
+        mimeType: 'application/x-msdownload',
+        fileSize: 1940224,
+        headerHexOverride: '4D5A9000030000000400',
+      },
+      enforcement: EnforcementStatus.PersonalWarned,
+      personalWarningSent: true,
+    },
+    {
+      id: 'evt-seed-3',
+      offsetMs: 5.8 * hour,
+      chatId: '-10018823409',
+      chatTitle: 'Android Security Community',
+      chatType: ChatSourceType.Supergroup,
+      senderName: 'David Chen',
+      senderUsername: '@dchen_sec',
+      text: 'Here is the official documentation link https://core.telegram.org/bots/api for configuring getUpdates and privacy mode.',
+      attachment: null,
+      enforcement: EnforcementStatus.Allowed,
+      personalWarningSent: false,
+    },
+    {
+      id: 'evt-seed-4',
+      offsetMs: 14.5 * hour,
+      chatId: '618230941',
+      chatTitle: 'Direct Message',
+      chatType: ChatSourceType.Private,
+      senderName: 'Sophia Lin',
+      senderUsername: '@sophia_sg_gold',
+      text: 'Guaranteed 18% daily profit with our automated crypto arbitrage VIP signal group! Send 200 USDT to double your balance in 4 hours.',
+      attachment: null,
+      enforcement: EnforcementStatus.PersonalWarned,
+      personalWarningSent: true,
+    },
+    {
+      id: 'evt-seed-5',
+      offsetMs: 27 * hour,
+      chatId: '-10014298311',
+      chatTitle: 'Product Design Guild',
+      chatType: ChatSourceType.Group,
+      senderName: 'Promo Blast Account',
+      senderUsername: '@nitro_free_gen26',
+      text: 'CASINO BONUS 500% FREE SPINS NO DEPOSIT REQUIRED! Play slots and crash games instant crypto cashout at https://spin-win-crypto.buzz/bonus',
+      attachment: null,
+      enforcement: EnforcementStatus.ChatWarned,
+      personalWarningSent: true,
+    },
+    {
+      id: 'evt-seed-6',
+      offsetMs: 52 * hour,
+      chatId: '883104920',
+      chatTitle: 'Direct Message',
+      chatType: ChatSourceType.Private,
+      senderName: 'Telegram Premium Gift',
+      senderUsername: '@gift_tg_yearly',
+      text: 'Someone gifted you 12 months of Telegram Premium! Sign in with your phone number and login OTP code at https://t-me-premium-gift.sbs/redeem',
+      attachment: null,
+      enforcement: EnforcementStatus.PersonalWarned,
+      personalWarningSent: true,
+    },
+    {
+      id: 'evt-seed-7',
+      offsetMs: 96 * hour,
+      chatId: '-10019482011',
+      chatTitle: 'DeFi & Layer2 Developers',
+      chatType: ChatSourceType.Supergroup,
+      senderName: 'Patch Bot',
+      senderUsername: '@wallet_hotfix_apk',
+      text: 'Critical Android security update for Tonkeeper mobile users — install hotfix APK immediately.',
+      attachment: {
+        fileName: 'Tonkeeper_v4.9_Hotfix.apk',
+        mimeType: 'application/vnd.android.package-archive',
+        fileSize: 8412096,
+        headerHexOverride: '504B0304140008080800',
+      },
+      enforcement: EnforcementStatus.Quarantined,
+      personalWarningSent: true,
+    },
+    {
+      id: 'evt-seed-8',
+      offsetMs: 140 * hour,
+      chatId: '-10014298311',
+      chatTitle: 'Product Design Guild',
+      chatType: ChatSourceType.Group,
+      senderName: 'Priya Nair',
+      senderUsername: '@priya_ux',
+      text: 'Hey team, are we still meeting at 3pm to review the Android release notes?',
+      attachment: null,
+      enforcement: EnforcementStatus.Allowed,
+      personalWarningSent: false,
+    },
+  ];
+
+  const computed: ThreatEvent[] = [];
+  for (const item of rawSeeds) {
+    const analysis = await localMlEngine.evaluateEvent({
+      text: item.text,
+      attachment: item.attachment,
+    });
+    computed.push({
+      id: item.id,
+      eventOrigin: 'seed',
+      timestamp: Math.round(now - item.offsetMs),
+      chatId: item.chatId,
+      chatTitle: item.chatTitle,
+      chatType: item.chatType,
+      senderName: item.senderName,
+      senderUsername: item.senderUsername,
+      messagePreview: item.text,
+      analysis,
+      enforcement:
+        analysis.category === ThreatCategory.Clean ? EnforcementStatus.Allowed : item.enforcement,
+      personalWarningSent: item.personalWarningSent,
+      encryptedAtRest: true,
+    });
+  }
+
+  return computed;
+}

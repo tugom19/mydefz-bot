@@ -1,0 +1,6 @@
+{
+  "name": "SentinelGram Shield",
+  "description": "End-to-end encrypted Telegram security companion featuring on-device machine learning phishing detection, malware attachment scanning, automated personal warning alerts, and administrative threat analytics.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

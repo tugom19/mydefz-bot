@@ -1,0 +1,43 @@
+{
+  "id": "/",
+  "name": "SentinelGram Shield",
+  "short_name": "SentinelGram",
+  "description": "Live cloud-connected Telegram security monitor for Chrome Web on Android with real-time scam/malware file alerts and multi-engine threat intelligence over Wi-Fi and mobile data.",
+  "theme_color": "#0f172a",
+  "background_color": "#0f172a",
+  "display": "standalone",
+  "orientation": "portrait",
+  "scope": "/",
+  "start_url": "/",
+  "prefer_related_applications": false,
+  "categories": ["security", "utilities", "productivity"],
+  "share_target": {
+    "action": "/",
+    "method": "GET",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "icons": [
+    {
+      "src": "/pwa-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "/pwa-maskable-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
+    }
+  ]
+}
