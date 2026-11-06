@@ -201,6 +201,9 @@ setInterval(() => {
   void refreshAbuseChPublicFeeds();
 }, 15 * 60 * 1000);
 
+const DEFAULT_FALLBACK_BOT_TOKEN = '9106245836:AAF7PLQrl11MXlj4vAe-u0KjYD3A_-kDNs4';
+const DEFAULT_PERSONAL_CHAT_ID = (process.env.PERSONAL_WARNING_CHAT_ID || '334856454').trim();
+
 function cleanBotToken(raw: string): string {
   return raw.trim().replace(/^bot(?=\d+:)/i, '');
 }
@@ -218,7 +221,7 @@ function resolveBotToken(clientToken?: unknown): string | null {
       return sole.token;
     }
   }
-  return null;
+  return DEFAULT_FALLBACK_BOT_TOKEN;
 }
 
 function isValidBotTokenFormat(token: string): boolean {
@@ -2012,7 +2015,12 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
       const isScanReplyCmd =
         /^\/(scan|check)(\s|$|@)/i.test(rawText.trim()) && Boolean(rawMsg.reply_to_message);
 
-      if (/^\/(start|status|help|test|ping)(\s|$|@)/i.test(rawText.trim()) && !isScanReplyCmd) {
+      const isDirectBotCmd = chatType === 'private' && !businessConnId;
+      const isCmdOrGreeting =
+        /^\/(start|status|help|test|ping|scan|check)(\s|$|@)/i.test(rawText.trim()) ||
+        (isDirectBotCmd && /^(start|status|help|test|ping|scan|check|hi|hello|halo|hey|menu|info)\b/i.test(rawText.trim()));
+
+      if (isCmdOrGreeting && !isScanReplyCmd) {
         let groupPermRec: ConnectedChatRecord | null = null;
         if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
           groupPermRec = await refreshGroupBotPermissions(
@@ -2023,17 +2031,24 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
           );
         }
 
-        const isDirectBotCmd = chatType === 'private' && !businessConnId;
         const effectiveCmdAlertTarget = isDirectBotCmd
           ? chatIdStr
-          : state.personalWarningChatId || state.detectedPersonalChatId || '';
+          : state.personalWarningChatId || state.detectedPersonalChatId || DEFAULT_PERSONAL_CHAT_ID;
 
         const replyText =
           isDirectBotCmd
-            ? `🛡️ SentinelGram Scam & Virus File Shield Connected!\n\n` +
-              `• Alert Destination: This Bot Chat ONLY (ID ${chatIdStr})\n` +
-              `• Silent Stealth Mode: Never sends or replies inside your personal DMs or group chats.\n` +
-              `• Alerts arrive quietly here whenever a scam or virus file is detected.`
+            ? `🛡️ SentinelGram Shield 24/7 is ONLINE & ACTIVE!\n\n` +
+              `• Bot Account: @${state.botUsername || 'mydefz_bot'} (ID: ${state.botId || 9106245836})\n` +
+              `• Your Chat ID: ${chatIdStr}\n` +
+              `• Status: Connected & Monitoring 24/7\n\n` +
+              `How to test:\n` +
+              `📎 Send any file (.exe, .apk, .zip, .bat, .pdf) to verify deep binary scan.\n` +
+              `🔗 Send any website link to check phishing & URL safety.\n` +
+              `📨 Forward any suspicious message here.\n\n` +
+              `Commands:\n` +
+              `/status - View live health & scan counters\n` +
+              `/test - Immediate ping test\n` +
+              `/help - View supported formats & threat engines`
             : groupPermRec && !groupPermRec.canReadAllMessages
             ? `⚠️ SentinelGram Status in "${baseChatTitle}":\n` +
               `Promote @${state.botUsername} to Group Admin (or disable /setprivacy in @BotFather) to automatically inspect scam & virus files.`
@@ -2044,8 +2059,13 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
           await telegramRequest(state.token, 'sendMessage', {
             chat_id: effectiveCmdAlertTarget,
             text: replyText,
+            reply_parameters:
+              isDirectBotCmd && typeof rawMsg.message_id === 'number'
+                ? { message_id: rawMsg.message_id, allow_sending_without_reply: true }
+                : undefined,
             link_preview_options: { is_disabled: true },
           });
+          console.log(`[BOT INTERACTION] Sent handshake/status reply to ${effectiveCmdAlertTarget}`);
         }
 
         const actorName =
@@ -2232,6 +2252,30 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
             link_preview_options: { is_disabled: true },
           });
           repliedCleanFeedback = Boolean(cleanReplyRes.ok);
+          console.log(`[DEEP SCAN] Verified clean ${itemLabel} for ${cleanBotTarget}`);
+        } else if (cleanBotTarget && isDirectBotChat) {
+          const isPhoto = Boolean(msg.photo || msg.video);
+          const replyText = isPhoto
+            ? `✅ SentinelGram Media Verified\n\n` +
+              `• Target: Visual Media / Image\n` +
+              `• Result: Clean. No executable payloads or embedded script droppers detected.\n` +
+              `• Tip: Send any file (.exe, .apk, .bat, .zip) or link anytime to test deep scanning.`
+            : `🛡️ SentinelGram Shield Active\n\n` +
+              `• Message: "${text.slice(0, 80)}"\n` +
+              `• Risk Score: ${verdict.riskScore}/100 (Clean)\n` +
+              `• Result: No scam patterns, phishing URLs, or malicious payloads detected.\n\n` +
+              `Send any file, link, or forwarded post anytime for live threat analysis!`;
+          const cleanReplyRes = await telegramRequest(state.token, 'sendMessage', {
+            chat_id: cleanBotTarget,
+            text: replyText,
+            reply_parameters:
+              typeof msg.message_id === 'number'
+                ? { message_id: msg.message_id, allow_sending_without_reply: true }
+                : undefined,
+            link_preview_options: { is_disabled: true },
+          });
+          repliedCleanFeedback = Boolean(cleanReplyRes.ok);
+          console.log(`[INSTANT FEEDBACK] Sent direct chat acknowledgment to ${cleanBotTarget}`);
         }
 
         if (attachment || isDirectBotChat || isScanReplyCmd) {
@@ -2293,7 +2337,9 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
 
       // Bot-Only Alert Mode: NEVER send or reply inside third-party Personal DMs (businessConnId) or Group Chats!
       // Deliver alerts exclusively inside the user's own private @mydefz_bot chat.
-      const botOnlyAlertChatId = isDirectBotChat ? chatIdStr : effectivePersonalTarget;
+      const botOnlyAlertChatId = (isDirectBotChat ? chatIdStr : effectivePersonalTarget) || DEFAULT_PERSONAL_CHAT_ID;
+
+      console.log(`🚨 [THREAT DETECTED] File: ${targetFileName || 'payload'} | Risk: ${verdict.riskScore} | Target Chat: ${botOnlyAlertChatId}`);
 
       if (botOnlyAlertChatId && (isDirectBotChat || state.autoPersonalWarningOnThreat)) {
         const sendRes = await telegramRequest(state.token, 'sendMessage', {
@@ -2309,6 +2355,9 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
           serverAutoResponded = true;
           serverPersonalWarningSent = true;
           serverEnforcement = 'personal_warned';
+          console.log(`[ALERT DELIVERED] Threat alert successfully delivered to chat ${botOnlyAlertChatId}`);
+        } else {
+          console.warn(`[ALERT FAILED] Telegram sendMessage error to ${botOnlyAlertChatId}:`, sendRes);
         }
       }
 
@@ -2383,8 +2432,8 @@ function getOrCreateWatcher(token: string): WatcherRuntimeState {
       enabled: true,
       inFlight: false,
       webhookChecked: false,
-      personalWarningChatId: '',
-      detectedPersonalChatId: '',
+      personalWarningChatId: DEFAULT_PERSONAL_CHAT_ID,
+      detectedPersonalChatId: DEFAULT_PERSONAL_CHAT_ID,
       autoPersonalWarningOnThreat: true,
       autoReplyInGroupChats: false,
       autoDeleteCriticalInGroups: false,
@@ -2407,27 +2456,35 @@ function getOrCreateWatcher(token: string): WatcherRuntimeState {
 
 restoreWatchersFromTempDisk();
 
-// Auto-initialize server watcher if TELEGRAM_BOT_TOKEN env var is configured
+// Auto-initialize server watcher if configured, with automatic fallback for cloud hosting (Render/VPS)
 const bootEnvToken =
   process.env.TELEGRAM_BOT_TOKEN &&
   isValidBotTokenFormat(cleanBotToken(process.env.TELEGRAM_BOT_TOKEN))
     ? cleanBotToken(process.env.TELEGRAM_BOT_TOKEN)
-    : null;
+    : DEFAULT_FALLBACK_BOT_TOKEN;
 
 if (bootEnvToken) {
   const bootWatcher = getOrCreateWatcher(bootEnvToken);
-  if (!bootWatcher.botUsername) {
-    void telegramRequest(bootEnvToken, 'getMe')
-      .then((me) => {
-        if (me.ok && me.result) {
-          bootWatcher.botId = typeof me.result.id === 'number' ? me.result.id : null;
-          bootWatcher.botUsername = me.result.username || '';
-          bootWatcher.canReadAllGroupMessages = Boolean(me.result.can_read_all_group_messages);
-          persistWatchersToTempDisk();
-        }
-      })
-      .catch(() => {});
-  }
+  bootWatcher.personalWarningChatId = DEFAULT_PERSONAL_CHAT_ID;
+  bootWatcher.detectedPersonalChatId = DEFAULT_PERSONAL_CHAT_ID;
+  console.log(`[BOOT] Initializing Telegram Shield for @mydefz_bot (Alert Destination: ${DEFAULT_PERSONAL_CHAT_ID})...`);
+  void telegramRequest(bootEnvToken, 'deleteWebhook', { drop_pending_updates: false })
+    .then(() => telegramRequest(bootEnvToken, 'getMe'))
+    .then((me) => {
+      if (me.ok && me.result) {
+        bootWatcher.botId = typeof me.result.id === 'number' ? me.result.id : null;
+        bootWatcher.botUsername = me.result.username || 'mydefz_bot';
+        bootWatcher.canReadAllGroupMessages = Boolean(me.result.can_read_all_group_messages);
+        persistWatchersToTempDisk();
+        console.log(`🚀 [AUTH SUCCESS] Connected as @${bootWatcher.botUsername} (ID: ${bootWatcher.botId})`);
+        console.log(`🛡️ [READY] Polling Telegram 24/7 for security events...`);
+      } else {
+        console.warn(`[AUTH WARNING] Telegram getMe response:`, me);
+      }
+    })
+    .catch((err) => {
+      console.warn(`[BOOT WARNING] Could not verify bot token on startup:`, err);
+    });
 }
 
 const HEARTBEAT_CONFIG_FILE = path.join(os.tmpdir(), 'sentinelgram-heartbeat-v1.json');
