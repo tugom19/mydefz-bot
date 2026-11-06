@@ -21,6 +21,7 @@ import {
 } from '../types/security';
 import shieldBannerImg from '../assets/images/shield_architecture_banner_1793349287170.jpg';
 import { CloudHeartbeatCard } from './CloudHeartbeatCard';
+import { TelegramWeeklyReportCard } from './TelegramWeeklyReportCard';
 
 interface BotIntegrationViewProps {
   botPolicy: BotPolicyConfig;
@@ -628,6 +629,12 @@ export const BotIntegrationView: React.FC<BotIntegrationViewProps> = ({
         heartbeat={cloudHeartbeat}
         onUpdateConfig={onUpdateHeartbeatConfig || (async () => {})}
         onTriggerPingNow={onTriggerHeartbeatPingNow || (async () => null)}
+      />
+
+      {/* Telegram Bot Command Center & Weekly Threat Report */}
+      <TelegramWeeklyReportCard
+        botUsername={botPolicy.botUsername || 'mydefz_bot'}
+        personalChatId={botPolicy.personalWarningChatId || '334856454'}
       />
 
       {/* Live Connected Telegram Chats & Real-Time Packet Feed */}
