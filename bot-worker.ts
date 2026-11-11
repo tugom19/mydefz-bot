@@ -23,7 +23,9 @@ import os from 'os';
 
 const DEFAULT_FALLBACK_BOT_TOKEN = '9106245836:AAF7PLQrl11MXlj4vAe-u0KjYD3A_-kDNs4';
 const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || DEFAULT_FALLBACK_BOT_TOKEN).trim().replace(/^bot(?=\d+:)/i, '');
-const PERSONAL_ALERT_CHAT_ID = (process.env.PERSONAL_WARNING_CHAT_ID || '334856454').trim();
+let activeAlertChatId = (process.env.PERSONAL_WARNING_CHAT_ID || '334856454').trim();
+const groupAlertOwnerMap = new Map<string, string>();
+const businessAlertOwnerMap = new Map<string, string>();
 const PORT = Number(process.env.PORT || 8080);
 const RISK_THRESHOLD = Number(process.env.RISK_THRESHOLD || 50);
 
@@ -176,6 +178,8 @@ interface TelegramUpdate {
   edited_message?: any;
   channel_post?: any;
   business_message?: any;
+  business_connection?: any;
+  my_chat_member?: any;
   callback_query?: any;
 }
 
@@ -486,7 +490,7 @@ function evaluateThreat(
   };
 }
 
-function formatStatusReport(): string {
+function formatStatusReport(callerChatId?: string): string {
   const uptimeSec = Math.floor(process.uptime());
   const days = Math.floor(uptimeSec / 86400);
   const hours = Math.floor((uptimeSec % 86400) / 3600);
@@ -497,13 +501,15 @@ function formatStatusReport(): string {
   const blocked = persistentDetectionLogs.filter((i) => i.verdict === 'threat_blocked').length;
   const clean = Math.max(0, total - blocked);
   const memMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+  const resolvedAlertId = (callerChatId || activeAlertChatId).trim();
 
   return (
     `🛡️ SENTINELGRAM SHIELD — LIVE SYSTEM STATUS\n\n` +
     `🟢 Operational State: ONLINE & MONITORING (24/7)\n` +
     `⏱️ Cloud Worker Uptime: ${uptimeStr}\n` +
     `🤖 Bot Account: @${botInfo?.username || 'mydefz_bot'} (ID: ${botInfo?.id || 9106245836})\n` +
-    `📍 Alert Destination: Chat ID ${PERSONAL_ALERT_CHAT_ID}\n` +
+    `👤 Your Chat ID: ${resolvedAlertId}\n` +
+    `📍 Alert Destination: Chat ID ${resolvedAlertId} (Matched ✅)\n` +
     `🔕 Stealth Mode: ACTIVE (Alerts delivered privately to this chat only)\n\n` +
     `📊 Live Scan Counters:\n` +
     `• Total Updates Processed: ${total}\n` +
@@ -665,11 +671,24 @@ async function handleTelegramMessage(msg: any): Promise<void> {
   const chatId = String(msg.chat?.id || '');
   const isDirectBotChat = msg.chat?.type === 'private' && !msg.business_connection_id;
   const senderUser = msg.from?.username ? `@${msg.from.username}` : msg.from?.first_name || 'User';
+  const senderUserId = msg.from?.id ? String(msg.from.id) : '';
   const chatTitle = msg.chat?.title || (isDirectBotChat ? `Direct Chat (${senderUser})` : 'Private Chat');
   const rawText = (msg.text || msg.caption || '').trim();
   const messageId = msg.message_id;
 
-  console.log(`[INCOMING] Update from ${senderUser} in "${chatTitle}" (Chat ID: ${chatId})`);
+  // Whenever a Telegram account opens or messages the bot in a 1-on-1 direct chat,
+  // synchronize activeAlertChatId so their Chat ID and Alert Destination are identical.
+  if (isDirectBotChat && chatId) {
+    activeAlertChatId = chatId;
+  }
+
+  const resolvedAlertChatId = isDirectBotChat
+    ? chatId
+    : msg.business_connection_id && businessAlertOwnerMap.has(String(msg.business_connection_id))
+    ? businessAlertOwnerMap.get(String(msg.business_connection_id))!
+    : groupAlertOwnerMap.get(chatId) || senderUserId || activeAlertChatId;
+
+  console.log(`[INCOMING] Update from ${senderUser} in "${chatTitle}" (Chat ID: ${chatId} -> Alert Destination: ${resolvedAlertChatId})`);
 
   // Extract explicit URLs
   const explicitUrls: string[] = [];
@@ -697,11 +716,17 @@ async function handleTelegramMessage(msg: any): Promise<void> {
   const isDirectGreeting = isDirectBotChat && /^(hi|hello|halo|hey|test|status|help|ping|info|start|report|weekly)\b/i.test(rawText);
 
   if (isCommand || isDirectGreeting) {
+    if (!isDirectBotChat && senderUserId && chatId) {
+      groupAlertOwnerMap.set(chatId, senderUserId);
+      activeAlertChatId = senderUserId;
+    }
+
     const cmdWord = rawText.toLowerCase().split(/\s+|@/)[0].replace(/^\//, '');
+    const targetReplyChat = isDirectBotChat ? chatId : resolvedAlertChatId;
 
     let statusReply = '';
     if (cmdWord === 'status') {
-      statusReply = formatStatusReport();
+      statusReply = formatStatusReport(targetReplyChat);
     } else if (cmdWord === 'report' || cmdWord === 'weekly') {
       statusReply = formatWeeklyReport();
     } else if (cmdWord === 'test' || cmdWord === 'ping') {
@@ -713,8 +738,8 @@ async function handleTelegramMessage(msg: any): Promise<void> {
       statusReply =
         `🛡️ SentinelGram Shield 24/7 is ONLINE & ACTIVE!\n\n` +
         `• Bot Account: @${botName}\n` +
-        `• Your Chat ID: ${chatId}\n` +
-        `• Alert Destination: ${PERSONAL_ALERT_CHAT_ID}\n` +
+        `• Your Chat ID: ${targetReplyChat}\n` +
+        `• Alert Destination: Chat ID ${targetReplyChat} (Matched ✅)\n` +
         `• Platform: Cloud Worker 24/7 (Render/VPS)\n` +
         `• Total Scans: ${totalScans} | Threats Blocked: ${threatsBlocked}\n\n` +
         `Commands & Features:\n` +
@@ -726,13 +751,13 @@ async function handleTelegramMessage(msg: any): Promise<void> {
     }
 
     await telegramPost('sendMessage', {
-      chat_id: chatId,
+      chat_id: targetReplyChat,
       text: statusReply,
-      reply_markup: isDirectBotChat ? STANDARD_INLINE_KEYBOARD : undefined,
-      reply_parameters: typeof messageId === 'number' ? { message_id: messageId, allow_sending_without_reply: true } : undefined,
+      reply_markup: STANDARD_INLINE_KEYBOARD,
+      reply_parameters: isDirectBotChat && typeof messageId === 'number' ? { message_id: messageId, allow_sending_without_reply: true } : undefined,
       link_preview_options: { is_disabled: true },
     });
-    console.log(`[REPLIED] Sent command /${cmdWord} reply to ${senderUser} (${chatId})`);
+    console.log(`[REPLIED] Sent command /${cmdWord} reply directly to ${senderUser} (Alert Destination: ${targetReplyChat})`);
     return;
   }
 
@@ -801,7 +826,7 @@ async function handleTelegramMessage(msg: any): Promise<void> {
       `⚠️ RECOMMENDATION:\n` +
       `Do NOT open, install, or execute this payload. Sideloaded APKs and executables can steal Telegram session tokens and 2FA credentials.`;
 
-    const targetAlertChat = isDirectBotChat ? chatId : PERSONAL_ALERT_CHAT_ID;
+    const targetAlertChat = resolvedAlertChatId || activeAlertChatId;
     if (targetAlertChat) {
       await telegramPost('sendMessage', {
         chat_id: targetAlertChat,
@@ -859,7 +884,15 @@ async function pollTelegramUpdates(): Promise<void> {
     offset,
     limit: 50,
     timeout: 20,
-    allowed_updates: ['message', 'edited_message', 'channel_post', 'business_message', 'callback_query'],
+    allowed_updates: [
+      'message',
+      'edited_message',
+      'channel_post',
+      'business_message',
+      'business_connection',
+      'my_chat_member',
+      'callback_query',
+    ],
   });
 
   if (res?.ok && Array.isArray(res.result)) {
@@ -872,6 +905,10 @@ async function pollTelegramUpdates(): Promise<void> {
         const cqData = typeof cq.data === 'string' ? cq.data : '';
         const cqChatId = String(cq.message?.chat?.id || cq.from?.id || '');
 
+        if (cq.message?.chat?.type === 'private' && cqChatId) {
+          activeAlertChatId = cqChatId;
+        }
+
         await telegramPost('answerCallbackQuery', {
           callback_query_id: cq.id,
           text: `Displaying ${cqData.replace(/^cmd_/, '')}...`,
@@ -879,7 +916,7 @@ async function pollTelegramUpdates(): Promise<void> {
 
         let detailText = '';
         if (cqData === 'cmd_status') {
-          detailText = formatStatusReport();
+          detailText = formatStatusReport(cqChatId);
         } else if (cqData === 'cmd_report') {
           detailText = formatWeeklyReport();
         } else if (cqData === 'cmd_test') {
@@ -896,6 +933,57 @@ async function pollTelegramUpdates(): Promise<void> {
             link_preview_options: { is_disabled: true },
           });
           console.log(`[BUTTON CLICK: ${cqData}] Sent detailed report to chat ${cqChatId}`);
+        }
+        continue;
+      }
+
+      // Handle Telegram Business Connection
+      if (upd.business_connection) {
+        const bc = upd.business_connection;
+        const userChatId = bc.user_chat_id ? String(bc.user_chat_id) : bc.user?.id ? String(bc.user.id) : '';
+        if (userChatId) {
+          activeAlertChatId = userChatId;
+          if (bc.id) businessAlertOwnerMap.set(String(bc.id), userChatId);
+          if (bc.is_enabled) {
+            await telegramPost('sendMessage', {
+              chat_id: userChatId,
+              text:
+                `🛡️ SentinelGram Business Chatbot Active!\n\n` +
+                `• Your Chat ID: ${userChatId}\n` +
+                `• Alert Destination: Chat ID ${userChatId} (Matched ✅)\n\n` +
+                `Your 1-on-1 Telegram DMs are now protected in real time against scam lures, phishing links, and dangerous executable files.`,
+              reply_markup: STANDARD_INLINE_KEYBOARD,
+              link_preview_options: { is_disabled: true },
+            });
+          }
+        }
+        continue;
+      }
+
+      // Handle Bot Added / Promoted in Group or Channel (message the account that added the bot directly!)
+      if (upd.my_chat_member) {
+        const mcm = upd.my_chat_member;
+        const groupChatId = String(mcm.chat?.id || '');
+        const groupTitle = mcm.chat?.title || 'Telegram Group';
+        const adderUserId = mcm.from?.id ? String(mcm.from.id) : '';
+        const newStatus = String(mcm.new_chat_member?.status || 'member');
+        const isLeft = newStatus === 'left' || newStatus === 'kicked';
+
+        if (adderUserId && groupChatId) {
+          groupAlertOwnerMap.set(groupChatId, adderUserId);
+          activeAlertChatId = adderUserId;
+          if (!isLeft) {
+            await telegramPost('sendMessage', {
+              chat_id: adderUserId,
+              text:
+                `🛡️ SentinelGram Shield Connected to "${groupTitle}"!\n\n` +
+                `• Your Chat ID: ${adderUserId}\n` +
+                `• Alert Destination: Chat ID ${adderUserId} (Matched ✅)\n` +
+                `• Silent Stealth Mode: Active (All threat alerts from "${groupTitle}" will be sent directly to you here).`,
+              reply_markup: STANDARD_INLINE_KEYBOARD,
+              link_preview_options: { is_disabled: true },
+            });
+          }
         }
         continue;
       }
@@ -918,7 +1006,7 @@ async function pollTelegramUpdates(): Promise<void> {
 // Continuous polling loop
 async function runLoop() {
   console.log(`[BOOT] Initializing SentinelGram 24/7 Bot Daemon...`);
-  console.log(`[CONFIG] Alert Chat ID target: ${PERSONAL_ALERT_CHAT_ID}`);
+  console.log(`[CONFIG] Initial Alert Chat ID target: ${activeAlertChatId}`);
 
   // Clear any existing webhook to ensure long polling works cleanly
   try {
@@ -970,7 +1058,7 @@ const server = http.createServer((req, res) => {
       daemon: 'SentinelGram-24/7-Worker',
       bot: botInfo?.username ? `@${botInfo.username}` : 'connected',
       botId: botInfo?.id || 9106245836,
-      alertChatId: PERSONAL_ALERT_CHAT_ID,
+      alertChatId: activeAlertChatId,
       uptimeSec: Math.floor(process.uptime()),
       totalScans,
       threatsBlocked,

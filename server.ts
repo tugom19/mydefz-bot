@@ -511,6 +511,8 @@ interface WatcherRuntimeState {
 }
 
 const activeWatchers = new Map<string, WatcherRuntimeState>();
+const groupAlertOwnerMap = new Map<string, string>();
+const businessAlertOwnerMap = new Map<string, string>();
 
 const DETECTION_LOG_FILE = path.join(os.tmpdir(), 'sentinelgram-detection-logs-v1.json');
 
@@ -617,7 +619,7 @@ const STANDARD_INLINE_KEYBOARD = {
   ],
 };
 
-function formatStatusReport(state: WatcherRuntimeState): string {
+function formatStatusReport(state: WatcherRuntimeState, callerChatId?: string): string {
   const uptimeSec = Math.floor(process.uptime());
   const days = Math.floor(uptimeSec / 86400);
   const hours = Math.floor((uptimeSec % 86400) / 3600);
@@ -628,13 +630,20 @@ function formatStatusReport(state: WatcherRuntimeState): string {
   const blocked = persistentDetectionLogs.filter((i) => i.verdict === 'threat_blocked').length;
   const clean = Math.max(state.cleanIgnoredCount, persistentDetectionLogs.filter((i) => i.verdict === 'clean_verified').length);
   const memMb = Math.round(process.memoryUsage().rss / 1024 / 1024);
+  const resolvedAlertId = (
+    callerChatId ||
+    state.personalWarningChatId ||
+    state.detectedPersonalChatId ||
+    DEFAULT_PERSONAL_CHAT_ID
+  ).trim();
 
   return (
     `🛡️ SENTINELGRAM SHIELD — LIVE SYSTEM STATUS\n\n` +
     `🟢 Operational State: ONLINE & MONITORING (24/7)\n` +
     `⏱️ Cloud Worker Uptime: ${uptimeStr}\n` +
     `🤖 Bot Account: @${state.botUsername || 'mydefz_bot'} (ID: ${state.botId || 9106245836})\n` +
-    `📍 Alert Destination: Chat ID ${state.personalWarningChatId || DEFAULT_PERSONAL_CHAT_ID}\n` +
+    `👤 Your Chat ID: ${resolvedAlertId}\n` +
+    `📍 Alert Destination: Chat ID ${resolvedAlertId} (Matched ✅)\n` +
     `🔕 Stealth Mode: ACTIVE (Alerts delivered privately to this chat only)\n\n` +
     `📊 Live Scan Counters:\n` +
     `• Total Updates Processed: ${total}\n` +
@@ -2187,6 +2196,11 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
         const cqData = typeof cq.data === 'string' ? cq.data : '';
         const cqChatId = String(cq.message?.chat?.id || cq.from?.id || '');
 
+        if (cq.message?.chat?.type === 'private' && cqChatId) {
+          state.detectedPersonalChatId = cqChatId;
+          state.personalWarningChatId = cqChatId;
+        }
+
         await telegramRequest(state.token, 'answerCallbackQuery', {
           callback_query_id: cq.id,
           text: `Displaying ${cqData.replace(/^cmd_/, '')}...`,
@@ -2194,7 +2208,7 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
 
         let detailText = '';
         if (cqData === 'cmd_status') {
-          detailText = formatStatusReport(state);
+          detailText = formatStatusReport(state, cqChatId);
         } else if (cqData === 'cmd_report') {
           detailText = formatWeeklyReport(persistentDetectionLogs, state);
         } else if (cqData === 'cmd_test') {
@@ -2218,7 +2232,7 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
       // 1. Handle Telegram Business Chatbot Connection (Settings -> Telegram Business -> Chatbots)
       if (upd.business_connection) {
         const bc = upd.business_connection;
-        const userChatId = bc.user_chat_id ? String(bc.user_chat_id) : '';
+        const userChatId = bc.user_chat_id ? String(bc.user_chat_id) : bc.user?.id ? String(bc.user.id) : '';
         const ownerName =
           [bc.user?.first_name, bc.user?.last_name].filter(Boolean).join(' ') ||
           bc.user?.username ||
@@ -2228,9 +2242,8 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
 
         if (userChatId) {
           state.detectedPersonalChatId = userChatId;
-          if (!state.personalWarningChatId) {
-            state.personalWarningChatId = userChatId;
-          }
+          state.personalWarningChatId = userChatId;
+          if (bc.id) businessAlertOwnerMap.set(String(bc.id), userChatId);
           state.connectedChats.set(`biz-${bc.id || userChatId}`, {
             chatId: userChatId,
             title: `${ownerName} (Business DMs)`,
@@ -2247,6 +2260,8 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
             chat_id: userChatId,
             text:
               `🛡️ SentinelGram Business Chatbot Active!\n\n` +
+              `• Your Chat ID: ${userChatId}\n` +
+              `• Alert Destination: Chat ID ${userChatId} (Matched ✅)\n\n` +
               `Your 1-on-1 Telegram DMs are now protected in real time against scam lures, phishing links, and dangerous executable files (.exe, .apk, .scr, .bat, .js, .msi).`,
             link_preview_options: { is_disabled: true },
           });
@@ -2316,18 +2331,31 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
             lastActivityAt: Date.now(),
           });
 
+          // Record the Telegram account that added or promoted the bot in this group
+          const adderUserId = mcm.from?.id ? String(mcm.from.id) : '';
+          if (adderUserId && chatIdStr) {
+            groupAlertOwnerMap.set(chatIdStr, adderUserId);
+            state.detectedPersonalChatId = adderUserId;
+            state.personalWarningChatId = adderUserId;
+          }
+
           // Never post announcements inside the group chat; notify ONLY inside the user's own private bot chat
           const shouldAnnounceJoinOrPromote = !isLeft && (wasAbsent || (!wasAdmin && isAdmin));
 
           if (shouldAnnounceJoinOrPromote) {
+            const effectivePersonalTarget =
+              adderUserId || state.personalWarningChatId || state.detectedPersonalChatId;
             const statusText = canReadAll
               ? `🛡️ SentinelGram Scam & Virus File Shield Active in "${chatTitle}"!\n` +
+                `• Your Chat ID: ${effectivePersonalTarget}\n` +
+                `• Alert Destination: Chat ID ${effectivePersonalTarget} (Matched ✅)\n` +
                 `Silent Stealth Mode: Never replies inside personal or group chats — sends alerts ONLY here in your bot when a scam or virus file is detected.`
               : `⚠️ SentinelGram Shield Joined "${chatTitle}" — 1 Quick Step Required!\n\n` +
+                `• Your Chat ID: ${effectivePersonalTarget}\n` +
+                `• Alert Destination: Chat ID ${effectivePersonalTarget} (Matched ✅)\n\n` +
                 `Because @BotFather Group Privacy Mode is ON, Telegram currently hides group file attachments from @${state.botUsername || 'this bot'}.\n\n` +
                 `👉 Open Group Info → Administrators → Add Admin → select @${state.botUsername || 'this bot'} (or disable /setprivacy in @BotFather).`;
 
-            const effectivePersonalTarget = state.personalWarningChatId || state.detectedPersonalChatId;
             if (effectivePersonalTarget && effectivePersonalTarget !== chatIdStr) {
               await telegramRequest(state.token, 'sendMessage', {
                 chat_id: effectivePersonalTarget,
@@ -2402,12 +2430,10 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
         chat.username ||
         'Direct Chat';
 
-      // Track chat in connectedChats
+      // Track chat in connectedChats and synchronize personal alert destination with the user's own Chat ID
       if (chatType === 'private' && !businessConnId && chatIdStr) {
         state.detectedPersonalChatId = chatIdStr;
-        if (!state.personalWarningChatId) {
-          state.personalWarningChatId = chatIdStr;
-        }
+        state.personalWarningChatId = chatIdStr;
         state.connectedChats.set(chatIdStr, {
           chatId: chatIdStr,
           title: `${baseChatTitle} (Direct Bot Chat)`,
@@ -2466,17 +2492,28 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
             baseChatTitle,
             chatType as 'group' | 'supergroup' | 'channel'
           );
+          if (rawMsg.from?.id) {
+            const callerUserId = String(rawMsg.from.id);
+            groupAlertOwnerMap.set(chatIdStr, callerUserId);
+            state.detectedPersonalChatId = callerUserId;
+            state.personalWarningChatId = callerUserId;
+          }
         }
 
         const effectiveCmdAlertTarget = isDirectBotCmd
           ? chatIdStr
-          : state.personalWarningChatId || state.detectedPersonalChatId || DEFAULT_PERSONAL_CHAT_ID;
+          : rawMsg.from?.id
+          ? String(rawMsg.from.id)
+          : groupAlertOwnerMap.get(chatIdStr) ||
+            state.personalWarningChatId ||
+            state.detectedPersonalChatId ||
+            DEFAULT_PERSONAL_CHAT_ID;
 
         const cmdWord = rawText.trim().toLowerCase().split(/\s+|@/)[0].replace(/^\//, '');
 
         let replyText = '';
         if (cmdWord === 'status') {
-          replyText = formatStatusReport(state);
+          replyText = formatStatusReport(state, effectiveCmdAlertTarget);
         } else if (cmdWord === 'report' || cmdWord === 'weekly') {
           replyText = formatWeeklyReport(persistentDetectionLogs, state);
         } else if (cmdWord === 'test' || cmdWord === 'ping') {
@@ -2490,7 +2527,8 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
             isDirectBotCmd
               ? `🛡️ SentinelGram Shield 24/7 is ONLINE & ACTIVE!\n\n` +
                 `• Bot Account: @${state.botUsername || 'mydefz_bot'} (ID: ${state.botId || 9106245836})\n` +
-                `• Your Chat ID: ${chatIdStr}\n` +
+                `• Your Chat ID: ${effectiveCmdAlertTarget}\n` +
+                `• Alert Destination: Chat ID ${effectiveCmdAlertTarget} (Matched ✅)\n` +
                 `• Status: Connected & Monitoring 24/7\n\n` +
                 `Commands & Features:\n` +
                 `• /status — View live health, daemon uptime & scan counters\n` +
@@ -2500,8 +2538,12 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
                 `Tap any feature button below to open its detailed report:`
               : groupPermRec && !groupPermRec.canReadAllMessages
               ? `⚠️ SentinelGram Status in "${baseChatTitle}":\n` +
+                `• Your Chat ID: ${effectiveCmdAlertTarget}\n` +
+                `• Alert Destination: Chat ID ${effectiveCmdAlertTarget} (Matched ✅)\n\n` +
                 `Promote @${state.botUsername} to Group Admin (or disable /setprivacy in @BotFather) to automatically inspect scam & virus files.`
               : `🛡️ SentinelGram Status in "${baseChatTitle}":\n` +
+                `• Your Chat ID: ${effectiveCmdAlertTarget}\n` +
+                `• Alert Destination: Chat ID ${effectiveCmdAlertTarget} (Matched ✅)\n\n` +
                 `Silent Bot-Only Alert Mode is ACTIVE (alerts sent only to this bot chat; never replies in group/personal chats).`;
         }
 
@@ -2669,7 +2711,14 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
       const effectiveThreat =
         verdict.isThreat && (verdict.isFileThreat || verdict.riskScore >= state.riskThreshold);
 
-      const effectivePersonalTarget = state.personalWarningChatId || state.detectedPersonalChatId;
+      const effectivePersonalTarget = isDirectBotChat
+        ? chatIdStr
+        : businessConnId && businessAlertOwnerMap.has(businessConnId)
+        ? businessAlertOwnerMap.get(businessConnId)!
+        : groupAlertOwnerMap.get(chatIdStr) ||
+          state.personalWarningChatId ||
+          state.detectedPersonalChatId ||
+          DEFAULT_PERSONAL_CHAT_ID;
 
       if (!effectiveThreat) {
         let repliedCleanFeedback = false;
@@ -2916,9 +2965,9 @@ const bootEnvToken =
 
 if (bootEnvToken) {
   const bootWatcher = getOrCreateWatcher(bootEnvToken);
-  bootWatcher.personalWarningChatId = DEFAULT_PERSONAL_CHAT_ID;
-  bootWatcher.detectedPersonalChatId = DEFAULT_PERSONAL_CHAT_ID;
-  console.log(`[BOOT] Initializing Telegram Shield for @mydefz_bot (Alert Destination: ${DEFAULT_PERSONAL_CHAT_ID})...`);
+  if (!bootWatcher.personalWarningChatId) bootWatcher.personalWarningChatId = DEFAULT_PERSONAL_CHAT_ID;
+  if (!bootWatcher.detectedPersonalChatId) bootWatcher.detectedPersonalChatId = DEFAULT_PERSONAL_CHAT_ID;
+  console.log(`[BOOT] Initializing Telegram Shield for @mydefz_bot (Alert Destination: ${bootWatcher.personalWarningChatId})...`);
   void telegramRequest(bootEnvToken, 'deleteWebhook', { drop_pending_updates: false })
     .then(() =>
       telegramRequest(bootEnvToken, 'setMyCommands', {
