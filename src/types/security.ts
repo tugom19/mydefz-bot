@@ -94,8 +94,17 @@ export interface ConnectedTelegramChat {
   lastActivityAt: number;
 }
 
+export interface UserBotPolicyConfig {
+  riskThreshold: number;
+  onlyScamAndVirusFiles: boolean;
+  autoPersonalWarningOnThreat: boolean;
+  e2eeRedactPreviewInWarnings: boolean;
+  soundAlertEnabled: boolean;
+}
+
 export interface BotInspectionDiagnostic {
   timestamp: number;
+  ownerChatId?: string;
   chatTitle: string;
   chatType: string;
   itemType: 'file' | 'message';

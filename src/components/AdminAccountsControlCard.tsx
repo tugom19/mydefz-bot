@@ -14,6 +14,8 @@ import {
   Users,
 } from 'lucide-react';
 
+import type { BotInspectionDiagnostic, UserBotPolicyConfig } from '../types/security';
+
 export interface ManagedTelegramAccount {
   chatId: string;
   displayName: string;
@@ -26,12 +28,14 @@ export interface ManagedTelegramAccount {
   lastActiveAt: number;
   totalScans: number;
   threatsBlocked: number;
+  botConfig?: UserBotPolicyConfig;
 }
 
-interface AdminAccountsResponse {
+export interface AdminAccountsResponse {
   ok: boolean;
   adminChatId: string;
   accounts: ManagedTelegramAccount[];
+  logsByAccount?: Record<string, BotInspectionDiagnostic[]>;
   globalStats?: {
     totalAccounts: number;
     activeAccounts: number;
@@ -41,7 +45,17 @@ interface AdminAccountsResponse {
   };
 }
 
-export const AdminAccountsControlCard: React.FC = () => {
+interface AdminAccountsControlCardProps {
+  selectedContextChatId?: string;
+  onSelectContextChatId?: (chatId: string) => void;
+  onAdminDataSynced?: (data: AdminAccountsResponse) => void;
+}
+
+export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> = ({
+  selectedContextChatId = 'ALL',
+  onSelectContextChatId,
+  onAdminDataSynced,
+}) => {
   const [data, setData] = useState<AdminAccountsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [actionBusyId, setActionBusyId] = useState<string | null>(null);
@@ -64,6 +78,7 @@ export const AdminAccountsControlCard: React.FC = () => {
         const json = (await res.json()) as AdminAccountsResponse;
         if (json.ok) {
           setData(json);
+          onAdminDataSynced?.(json);
         }
       }
     } catch {
@@ -71,7 +86,7 @@ export const AdminAccountsControlCard: React.FC = () => {
     } finally {
       if (showSpinner) setLoading(false);
     }
-  }, []);
+  }, [onAdminDataSynced]);
 
   useEffect(() => {
     void fetchAccounts(true);
@@ -414,6 +429,21 @@ export const AdminAccountsControlCard: React.FC = () => {
 
                     <td className="py-3.5 px-4 text-right">
                       <div className="inline-flex items-center justify-end gap-2 flex-wrap">
+                        {onSelectContextChatId && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectContextChatId(acc.chatId)}
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                              selectedContextChatId === acc.chatId
+                                ? 'bg-sky-600 text-white shadow-sm'
+                                : 'bg-sky-50 hover:bg-sky-100 dark:bg-sky-950/60 dark:hover:bg-sky-900/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800'
+                            }`}
+                          >
+                            <span>
+                              {selectedContextChatId === acc.chatId ? '✓ Active Context' : 'Switch Context'}
+                            </span>
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => handleViewUserReport(acc)}

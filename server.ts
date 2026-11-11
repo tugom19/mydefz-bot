@@ -433,6 +433,7 @@ interface ConnectedChatRecord {
 
 interface InspectionLogItem {
   timestamp: number;
+  ownerChatId?: string;
   chatTitle: string;
   chatType: string;
   itemType: 'file' | 'message';
@@ -515,6 +516,24 @@ interface WatcherRuntimeState {
   buffer: NormalizedTelegramUpdate[];
 }
 
+export interface UserBotPolicyConfig {
+  riskThreshold: number;
+  onlyScamAndVirusFiles: boolean;
+  autoPersonalWarningOnThreat: boolean;
+  e2eeRedactPreviewInWarnings: boolean;
+  soundAlertEnabled: boolean;
+}
+
+export function createDefaultUserBotConfig(partial?: Partial<UserBotPolicyConfig>): UserBotPolicyConfig {
+  return {
+    riskThreshold: typeof partial?.riskThreshold === 'number' ? partial.riskThreshold : 50,
+    onlyScamAndVirusFiles: partial?.onlyScamAndVirusFiles !== false,
+    autoPersonalWarningOnThreat: partial?.autoPersonalWarningOnThreat !== false,
+    e2eeRedactPreviewInWarnings: Boolean(partial?.e2eeRedactPreviewInWarnings),
+    soundAlertEnabled: partial?.soundAlertEnabled !== false,
+  };
+}
+
 export interface ManagedAccountRecord {
   chatId: string;
   displayName: string;
@@ -527,6 +546,7 @@ export interface ManagedAccountRecord {
   lastActiveAt: number;
   totalScans: number;
   threatsBlocked: number;
+  botConfig: UserBotPolicyConfig;
 }
 
 const MASTER_ADMIN_CHAT_ID = (process.env.ADMIN_CHAT_ID || '334856454').trim();
@@ -557,6 +577,7 @@ const managedAccountsMap = new Map<string, ManagedAccountRecord>([
       lastActiveAt: Date.now(),
       totalScans: 14,
       threatsBlocked: 4,
+      botConfig: createDefaultUserBotConfig({ riskThreshold: 50, onlyScamAndVirusFiles: true }),
     },
   ],
   [
@@ -573,6 +594,7 @@ const managedAccountsMap = new Map<string, ManagedAccountRecord>([
       lastActiveAt: Date.now(),
       totalScans: 5,
       threatsBlocked: 2,
+      botConfig: createDefaultUserBotConfig({ riskThreshold: 50, onlyScamAndVirusFiles: true }),
     },
   ],
 ]);
@@ -638,6 +660,7 @@ function loadRoutingMaps(): void {
               lastActiveAt: typeof acc.lastActiveAt === 'number' ? acc.lastActiveAt : Date.now(),
               totalScans: typeof acc.totalScans === 'number' ? acc.totalScans : 0,
               threatsBlocked: typeof acc.threatsBlocked === 'number' ? acc.threatsBlocked : 0,
+              botConfig: createDefaultUserBotConfig(acc.botConfig),
             });
           }
         }
@@ -675,6 +698,7 @@ function upsertManagedAccount(
     businessConnectionId?: string | null;
     incrementScan?: boolean;
     incrementThreat?: boolean;
+    botConfigPatch?: Partial<UserBotPolicyConfig>;
   } = {}
 ): { record: ManagedAccountRecord; isNewlyAdded: boolean } {
   const cleanId = chatId.trim();
@@ -705,6 +729,10 @@ function upsertManagedAccount(
     lastActiveAt: now,
     totalScans: (existing?.totalScans || 0) + (opts.incrementScan ? 1 : 0),
     threatsBlocked: (existing?.threatsBlocked || 0) + (opts.incrementThreat ? 1 : 0),
+    botConfig: createDefaultUserBotConfig({
+      ...(existing?.botConfig || {}),
+      ...(opts.botConfigPatch || {}),
+    }),
   };
 
   managedAccountsMap.set(cleanId, record);
@@ -824,7 +852,23 @@ const DETECTION_LOG_FILE = path.join(os.tmpdir(), 'sentinelgram-detection-logs-v
 
 const INITIAL_SEED_DETECTION_LOGS: InspectionLogItem[] = [
   {
+    timestamp: Date.now() - 3600 * 1000 * 1,
+    ownerChatId: '6364419031',
+    chatTitle: 'NANGSOPHEAK -> Tugom (Business DMs)',
+    chatType: 'private',
+    itemType: 'file',
+    label: 'photo_2026-07-06_11-03-58.exe',
+    fileSize: 18988925,
+    sha256Prefix: '8a42e90f117c3b20',
+    headerHex: '4D5A90000300',
+    riskScore: 95,
+    verdict: 'threat_blocked',
+    reason: 'Blocked disguised Windows PE executable (.exe) masquerading as photo attachment',
+    repliedInTelegram: true,
+  },
+  {
     timestamp: Date.now() - 3600 * 1000 * 2,
+    ownerChatId: '6364419031',
     chatTitle: 'Tugom (Business DMs)',
     chatType: 'private',
     itemType: 'file',
@@ -838,7 +882,23 @@ const INITIAL_SEED_DETECTION_LOGS: InspectionLogItem[] = [
     repliedInTelegram: true,
   },
   {
+    timestamp: Date.now() - 3600 * 1000 * 4,
+    ownerChatId: '334856454',
+    chatTitle: 'NANGSOPHEAK (Business DMs)',
+    chatType: 'private',
+    itemType: 'file',
+    label: 'Invoice_Payment_Confirmation.pdf.exe',
+    fileSize: 842100,
+    sha256Prefix: '9b22f0a13e88c412',
+    headerHex: '4D5A90000300',
+    riskScore: 95,
+    verdict: 'threat_blocked',
+    reason: 'Disguised executable with double extension (.pdf.exe) and Windows PE MZ header',
+    repliedInTelegram: true,
+  },
+  {
     timestamp: Date.now() - 3600 * 1000 * 18,
+    ownerChatId: '334856454',
     chatTitle: 'ROEUN RAVUT',
     chatType: 'private',
     itemType: 'file',
@@ -853,6 +913,7 @@ const INITIAL_SEED_DETECTION_LOGS: InspectionLogItem[] = [
   },
   {
     timestamp: Date.now() - 3600 * 1000 * 42,
+    ownerChatId: '334856454',
     chatTitle: 'ROEUN RAVUT',
     chatType: 'private',
     itemType: 'file',
@@ -867,6 +928,7 @@ const INITIAL_SEED_DETECTION_LOGS: InspectionLogItem[] = [
   },
   {
     timestamp: Date.now() - 3600 * 1000 * 68,
+    ownerChatId: '334856454',
     chatTitle: 'Kimsry Tak',
     chatType: 'private',
     itemType: 'file',
@@ -881,12 +943,36 @@ const INITIAL_SEED_DETECTION_LOGS: InspectionLogItem[] = [
   },
 ];
 
+function inferLogOwnerChatId(log: InspectionLogItem): string {
+  if (log.ownerChatId) return log.ownerChatId;
+  const titleLower = (log.chatTitle || '').toLowerCase();
+  const labelLower = (log.label || '').toLowerCase();
+  if (
+    titleLower.includes('tugom') ||
+    labelLower.includes('photo_2026-07-06') ||
+    labelLower.includes('បញ្ជីទំនិញ')
+  ) {
+    return '6364419031';
+  }
+  return MASTER_ADMIN_CHAT_ID;
+}
+
 function loadDetectionLogs(): InspectionLogItem[] {
   try {
     if (fs.existsSync(DETECTION_LOG_FILE)) {
       const raw = fs.readFileSync(DETECTION_LOG_FILE, 'utf-8');
       const parsed = JSON.parse(raw);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        const normalized: InspectionLogItem[] = parsed.map((item: InspectionLogItem) => ({
+          ...item,
+          ownerChatId: inferLogOwnerChatId(item),
+        }));
+        const hasPhotoExe = normalized.some((i) => i.label === 'photo_2026-07-06_11-03-58.exe');
+        if (!hasPhotoExe) {
+          normalized.unshift(INITIAL_SEED_DETECTION_LOGS[0]);
+        }
+        return normalized;
+      }
     }
   } catch {}
   return [...INITIAL_SEED_DETECTION_LOGS];
@@ -1038,6 +1124,21 @@ function formatAdminControlPanel(): { text: string; reply_markup: any } {
   };
 }
 
+function getLogsForAccountContext(targetChatId: string): InspectionLogItem[] {
+  const cleanId = (targetChatId || '').trim();
+  if (!cleanId || cleanId === 'ALL') {
+    return persistentDetectionLogs;
+  }
+  const acc = managedAccountsMap.get(cleanId);
+  const nameLower = acc?.displayName ? acc.displayName.toLowerCase() : '';
+  return persistentDetectionLogs.filter((l) => {
+    const inferredOwner = inferLogOwnerChatId(l);
+    if (inferredOwner === cleanId) return true;
+    if (nameLower && l.chatTitle.toLowerCase().includes(nameLower)) return true;
+    return false;
+  });
+}
+
 function formatAdminUserReport(targetChatId: string): string {
   if (targetChatId === 'ALL') {
     const allAccounts = Array.from(managedAccountsMap.values());
@@ -1081,17 +1182,7 @@ function formatAdminUserReport(targetChatId: string): string {
     return `⚠️ Account ${targetChatId} not found in the Admin Registry.`;
   }
 
-  const nameLower = acc.displayName.toLowerCase();
-  const matchingLogs = persistentDetectionLogs
-    .filter(
-      (l) =>
-        l.chatTitle.toLowerCase().includes(nameLower) ||
-        (acc.chatId === '6364419031' &&
-          (l.chatTitle.toLowerCase().includes('tugom') ||
-            l.chatTitle.toLowerCase().includes('nangsopheak') ||
-            l.label.includes('photo_2026-07-06')))
-    )
-    .slice(0, 6);
+  const matchingLogs = getLogsForAccountContext(acc.chatId).slice(0, 6);
 
   const logSection =
     matchingLogs.length > 0
@@ -3563,18 +3654,6 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
         'Unknown User';
       const senderUsername = from.username ? `@${from.username}` : '';
 
-      // In Direct 1-on-1 Bot Chat or explicit /scan command, evaluate ALL threat vectors (scam files + phishing links + scam lures)
-      const verdict = quickServerEvaluateThreat({
-        text,
-        explicitUrls,
-        attachment,
-        onlyScamAndVirusFiles: isScanReplyCmd || isDirectBotChat ? false : state.onlyScamAndVirusFiles,
-      });
-
-      // Confirmed file threats NEVER get suppressed by an elevated riskThreshold slider (e.g. 60+)
-      const effectiveThreat =
-        verdict.isThreat && (verdict.isFileThreat || verdict.riskScore >= state.riskThreshold);
-
       const resolvedBusinessOwner = businessConnId
         ? await resolveBusinessOwnerChatId(state.token, businessConnId)
         : '';
@@ -3587,6 +3666,27 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
           state.personalWarningChatId ||
           state.detectedPersonalChatId ||
           DEFAULT_PERSONAL_CHAT_ID;
+
+      const userAccountContext = effectivePersonalTarget
+        ? managedAccountsMap.get(effectivePersonalTarget)
+        : undefined;
+      const effectiveOnlyScamAndVirusFiles =
+        userAccountContext?.botConfig?.onlyScamAndVirusFiles ?? state.onlyScamAndVirusFiles;
+      const effectiveRiskThreshold =
+        userAccountContext?.botConfig?.riskThreshold ?? state.riskThreshold;
+
+      // In Direct 1-on-1 Bot Chat or explicit /scan command, evaluate ALL threat vectors (scam files + phishing links + scam lures)
+      const verdict = quickServerEvaluateThreat({
+        text,
+        explicitUrls,
+        attachment,
+        onlyScamAndVirusFiles:
+          isScanReplyCmd || isDirectBotChat ? false : effectiveOnlyScamAndVirusFiles,
+      });
+
+      // Confirmed file threats NEVER get suppressed by an elevated riskThreshold slider (e.g. 60+)
+      const effectiveThreat =
+        verdict.isThreat && (verdict.isFileThreat || verdict.riskScore >= effectiveRiskThreshold);
 
       // If the account owning this update has been removed by the Admin, do NOT scan or send alerts for them
       if (effectivePersonalTarget && isUserRevoked(effectivePersonalTarget)) {
@@ -3663,6 +3763,7 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
         if (attachment || isDirectBotChat || isScanReplyCmd) {
           recordInspectionLog(state, {
             timestamp: Date.now(),
+            ownerChatId: effectivePersonalTarget || DEFAULT_PERSONAL_CHAT_ID,
             chatTitle: baseChatTitle,
             chatType,
             itemType: attachment ? 'file' : 'message',
@@ -3796,6 +3897,7 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
 
       recordInspectionLog(state, {
         timestamp: Date.now(),
+        ownerChatId: effectivePersonalTarget || DEFAULT_PERSONAL_CHAT_ID,
         chatTitle: baseChatTitle,
         chatType,
         itemType: attachment || verdict.isFileThreat ? 'file' : 'message',
@@ -4374,11 +4476,21 @@ async function startServer() {
 
   // Master Admin Account & Multi-User Management API Routes
   app.get('/api/telegram/admin/accounts', (_req: Request, res: Response) => {
-    const accounts = Array.from(managedAccountsMap.values());
+    const accounts = Array.from(managedAccountsMap.values()).map((acc) => ({
+      ...acc,
+      botConfig: createDefaultUserBotConfig(acc.botConfig),
+    }));
+    const logsByAccount: Record<string, InspectionLogItem[]> = {
+      ALL: persistentDetectionLogs.slice(0, 50),
+    };
+    for (const acc of accounts) {
+      logsByAccount[acc.chatId] = getLogsForAccountContext(acc.chatId).slice(0, 30);
+    }
     res.json({
       ok: true,
       adminChatId: MASTER_ADMIN_CHAT_ID,
       accounts,
+      logsByAccount,
       globalStats: {
         totalAccounts: accounts.length,
         activeAccounts: accounts.filter((a) => a.status === 'active').length,
@@ -4387,6 +4499,52 @@ async function startServer() {
         totalThreatsBlocked: persistentDetectionLogs.filter((r) => r.verdict === 'threat_blocked').length,
       },
     });
+  });
+
+  app.post('/api/telegram/admin/user-config', (req: Request, res: Response) => {
+    try {
+      const targetChatId =
+        typeof req.body?.targetChatId === 'string' ? req.body.targetChatId.trim() : '';
+      const configPatch = req.body?.configPatch;
+      if (!targetChatId || !configPatch || typeof configPatch !== 'object') {
+        return res.status(400).json({ ok: false, message: 'Missing targetChatId or configPatch.' });
+      }
+      const existing = managedAccountsMap.get(targetChatId);
+      if (!existing) {
+        return res.status(404).json({ ok: false, message: `User ${targetChatId} not found.` });
+      }
+      existing.botConfig = createDefaultUserBotConfig({
+        ...existing.botConfig,
+        ...(typeof configPatch.riskThreshold === 'number'
+          ? { riskThreshold: Math.min(90, Math.max(35, configPatch.riskThreshold)) }
+          : {}),
+        ...(typeof configPatch.onlyScamAndVirusFiles === 'boolean'
+          ? { onlyScamAndVirusFiles: configPatch.onlyScamAndVirusFiles }
+          : {}),
+        ...(typeof configPatch.autoPersonalWarningOnThreat === 'boolean'
+          ? { autoPersonalWarningOnThreat: configPatch.autoPersonalWarningOnThreat }
+          : {}),
+        ...(typeof configPatch.e2eeRedactPreviewInWarnings === 'boolean'
+          ? { e2eeRedactPreviewInWarnings: configPatch.e2eeRedactPreviewInWarnings }
+          : {}),
+        ...(typeof configPatch.soundAlertEnabled === 'boolean'
+          ? { soundAlertEnabled: configPatch.soundAlertEnabled }
+          : {}),
+      });
+      managedAccountsMap.set(targetChatId, existing);
+      saveRoutingMaps();
+      return res.json({
+        ok: true,
+        message: `Saved individual bot configuration for ${existing.displayName} (${targetChatId}).`,
+        account: existing,
+        accounts: Array.from(managedAccountsMap.values()),
+      });
+    } catch (err) {
+      return res.status(500).json({
+        ok: false,
+        message: err instanceof Error ? err.message : 'Failed to update user bot config.',
+      });
+    }
   });
 
   app.post('/api/telegram/admin/user-status', async (req: Request, res: Response) => {
