@@ -23,13 +23,207 @@ import os from 'os';
 
 const DEFAULT_FALLBACK_BOT_TOKEN = '9106245836:AAF7PLQrl11MXlj4vAe-u0KjYD3A_-kDNs4';
 const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || DEFAULT_FALLBACK_BOT_TOKEN).trim().replace(/^bot(?=\d+:)/i, '');
+interface ManagedAccountRecord {
+  chatId: string;
+  displayName: string;
+  username: string;
+  role: 'admin' | 'user';
+  status: 'active' | 'removed';
+  connectionTypes: string[];
+  businessConnectionId?: string | null;
+  addedAt: number;
+  lastActiveAt: number;
+  totalScans: number;
+  threatsBlocked: number;
+}
+
+const MASTER_ADMIN_CHAT_ID = (process.env.ADMIN_CHAT_ID || '334856454').trim();
+const adminChatIds = new Set<string>([MASTER_ADMIN_CHAT_ID, '334856454']);
+const revokedUserChatIds = new Set<string>();
+
 let activeAlertChatId = (process.env.PERSONAL_WARNING_CHAT_ID || '334856454').trim();
 const groupAlertOwnerMap = new Map<string, string>();
-const businessAlertOwnerMap = new Map<string, string>();
+const businessAlertOwnerMap = new Map<string, string>([
+  ['jobbJzPcqFczAwAAagQntTeDgRw', '6364419031'], // Tugom (Account 2 Chat Automation)
+  ['mSE8OeLFKFdBBwAA5QlPK224v10', '334856454'],  // NANGSOPHEAK (Account 1 Chat Automation)
+]);
+const registeredSubscriberChatIds = new Set<string>(['334856454', '6364419031']);
+const recentAlertDedupMap = new Map<string, number>();
+
+const managedAccountsMap = new Map<string, ManagedAccountRecord>([
+  [
+    '334856454',
+    {
+      chatId: '334856454',
+      displayName: 'NANGSOPHEAK',
+      username: '@NANGSOPHEAK',
+      role: 'admin',
+      status: 'active',
+      connectionTypes: ['Direct Bot Chat', 'Business Chat Automation'],
+      businessConnectionId: 'mSE8OeLFKFdBBwAA5QlPK224v10',
+      addedAt: Date.now() - 86400000 * 3,
+      lastActiveAt: Date.now(),
+      totalScans: 14,
+      threatsBlocked: 4,
+    },
+  ],
+  [
+    '6364419031',
+    {
+      chatId: '6364419031',
+      displayName: 'Tugom',
+      username: 'Tugom',
+      role: 'user',
+      status: 'active',
+      connectionTypes: ['Business Chat Automation', 'Direct Bot Chat'],
+      businessConnectionId: 'jobbJzPcqFczAwAAagQntTeDgRw',
+      addedAt: Date.now() - 3600000 * 2,
+      lastActiveAt: Date.now(),
+      totalScans: 5,
+      threatsBlocked: 2,
+    },
+  ],
+]);
+
+function isAdminChatId(chatId?: string | null): boolean {
+  if (!chatId) return false;
+  return adminChatIds.has(chatId.trim());
+}
+
+function isUserRevoked(chatId?: string | null): boolean {
+  if (!chatId) return false;
+  const clean = chatId.trim();
+  if (isAdminChatId(clean)) return false;
+  if (revokedUserChatIds.has(clean)) return true;
+  const rec = managedAccountsMap.get(clean);
+  return rec?.status === 'removed';
+}
+
 const PORT = Number(process.env.PORT || 8080);
 const RISK_THRESHOLD = Number(process.env.RISK_THRESHOLD || 50);
 
 const DETECTION_LOG_FILE = path.join(os.tmpdir(), 'sentinelgram-detection-logs-v1.json');
+const ROUTING_MAP_FILE = path.join(os.tmpdir(), 'sentinelgram-routing-map-v1.json');
+
+function loadRoutingMaps(): void {
+  try {
+    if (fs.existsSync(ROUTING_MAP_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(ROUTING_MAP_FILE, 'utf-8'));
+      if (raw?.business && typeof raw.business === 'object') {
+        for (const [k, v] of Object.entries(raw.business)) {
+          if (k && typeof v === 'string' && v) {
+            businessAlertOwnerMap.set(k, v);
+            registeredSubscriberChatIds.add(v);
+          }
+        }
+      }
+      if (raw?.groups && typeof raw.groups === 'object') {
+        for (const [k, v] of Object.entries(raw.groups)) {
+          if (k && typeof v === 'string' && v) groupAlertOwnerMap.set(k, v);
+        }
+      }
+      if (Array.isArray(raw?.subscribers)) {
+        for (const s of raw.subscribers) {
+          if (typeof s === 'string' && s) registeredSubscriberChatIds.add(s);
+        }
+      }
+      if (Array.isArray(raw?.revoked)) {
+        for (const r of raw.revoked) {
+          if (typeof r === 'string' && r && !isAdminChatId(r)) {
+            revokedUserChatIds.add(r);
+          }
+        }
+      }
+      if (Array.isArray(raw?.managedAccounts)) {
+        for (const acc of raw.managedAccounts) {
+          if (acc?.chatId && typeof acc.chatId === 'string') {
+            const cid = acc.chatId.trim();
+            managedAccountsMap.set(cid, {
+              chatId: cid,
+              displayName: acc.displayName || `Account ${cid}`,
+              username: acc.username || '',
+              role: isAdminChatId(cid) ? 'admin' : acc.role === 'admin' ? 'admin' : 'user',
+              status: isAdminChatId(cid) ? 'active' : revokedUserChatIds.has(cid) || acc.status === 'removed' ? 'removed' : 'active',
+              connectionTypes: Array.isArray(acc.connectionTypes) ? acc.connectionTypes : ['Direct Bot Chat'],
+              businessConnectionId: acc.businessConnectionId || null,
+              addedAt: typeof acc.addedAt === 'number' ? acc.addedAt : Date.now(),
+              lastActiveAt: typeof acc.lastActiveAt === 'number' ? acc.lastActiveAt : Date.now(),
+              totalScans: typeof acc.totalScans === 'number' ? acc.totalScans : 0,
+              threatsBlocked: typeof acc.threatsBlocked === 'number' ? acc.threatsBlocked : 0,
+            });
+          }
+        }
+      }
+    }
+  } catch {}
+}
+
+let workerRoutingSaveTimer: ReturnType<typeof setTimeout> | null = null;
+function saveRoutingMaps(): void {
+  if (workerRoutingSaveTimer) return;
+  workerRoutingSaveTimer = setTimeout(() => {
+    workerRoutingSaveTimer = null;
+    try {
+      const payload = {
+        business: Object.fromEntries(businessAlertOwnerMap.entries()),
+        groups: Object.fromEntries(groupAlertOwnerMap.entries()),
+        subscribers: Array.from(registeredSubscriberChatIds),
+        revoked: Array.from(revokedUserChatIds),
+        managedAccounts: Array.from(managedAccountsMap.values()),
+      };
+      void fs.promises.writeFile(ROUTING_MAP_FILE, JSON.stringify(payload), { mode: 0o600 }).catch(() => {});
+    } catch {}
+  }, 200);
+}
+
+loadRoutingMaps();
+
+function upsertManagedAccount(
+  chatId: string,
+  opts: {
+    displayName?: string;
+    username?: string;
+    connectionType?: string;
+    businessConnectionId?: string | null;
+    incrementScan?: boolean;
+    incrementThreat?: boolean;
+  } = {}
+): { record: ManagedAccountRecord; isNewlyAdded: boolean } {
+  const cleanId = chatId.trim();
+  const existing = managedAccountsMap.get(cleanId);
+  const isNewlyAdded = !existing;
+  const now = Date.now();
+
+  const connSet = new Set<string>(existing?.connectionTypes || []);
+  if (opts.connectionType) connSet.add(opts.connectionType);
+  if (connSet.size === 0) connSet.add('Direct Bot Chat');
+
+  const record: ManagedAccountRecord = {
+    chatId: cleanId,
+    displayName:
+      opts.displayName && opts.displayName !== 'Direct Chat' && opts.displayName !== 'Private Chat'
+        ? opts.displayName
+        : existing?.displayName || `Telegram User ${cleanId}`,
+    username: opts.username || existing?.username || '',
+    role: isAdminChatId(cleanId) ? 'admin' : existing?.role || 'user',
+    status: isAdminChatId(cleanId)
+      ? 'active'
+      : revokedUserChatIds.has(cleanId)
+      ? 'removed'
+      : existing?.status || 'active',
+    connectionTypes: Array.from(connSet),
+    businessConnectionId: opts.businessConnectionId ?? existing?.businessConnectionId ?? null,
+    addedAt: existing?.addedAt || now,
+    lastActiveAt: now,
+    totalScans: (existing?.totalScans || 0) + (opts.incrementScan ? 1 : 0),
+    threatsBlocked: (existing?.threatsBlocked || 0) + (opts.incrementThreat ? 1 : 0),
+  };
+
+  managedAccountsMap.set(cleanId, record);
+  registeredSubscriberChatIds.add(cleanId);
+  saveRoutingMaps();
+  return { record, isNewlyAdded };
+}
 
 const PROTECTED_EXTENSIONS = new Set([
   'exe', 'scr', 'pif', 'com', 'msi', 'msp', 'dll', 'cpl',
@@ -177,7 +371,9 @@ interface TelegramUpdate {
   message?: any;
   edited_message?: any;
   channel_post?: any;
+  edited_channel_post?: any;
   business_message?: any;
+  edited_business_message?: any;
   business_connection?: any;
   my_chat_member?: any;
   callback_query?: any;
@@ -298,6 +494,159 @@ const STANDARD_INLINE_KEYBOARD = {
   ],
 };
 
+const ADMIN_INLINE_KEYBOARD = {
+  inline_keyboard: [
+    [
+      { text: '📊 Weekly Report', callback_data: 'cmd_report' },
+      { text: '⚡ Ping Test', callback_data: 'cmd_test' },
+    ],
+    [
+      { text: '🛡️ Health & Status', callback_data: 'cmd_status' },
+      { text: '📖 Help & Engines', callback_data: 'cmd_help' },
+    ],
+    [
+      { text: '👑 Admin: Users & Control', callback_data: 'cmd_admin' },
+      { text: '📋 All-Accounts Report', callback_data: 'adm_all_report' },
+    ],
+  ],
+};
+
+function getInlineKeyboardForChat(chatId?: string | null) {
+  return isAdminChatId(chatId) ? ADMIN_INLINE_KEYBOARD : STANDARD_INLINE_KEYBOARD;
+}
+
+function formatAdminControlPanel(): { text: string; reply_markup: any } {
+  const allAccounts = Array.from(managedAccountsMap.values());
+  const activeCount = allAccounts.filter((a) => a.status === 'active').length;
+  const removedCount = allAccounts.filter((a) => a.status === 'removed').length;
+  const totalBlocked = persistentDetectionLogs.filter((l) => l.verdict === 'threat_blocked').length;
+
+  const accountLines = allAccounts
+    .map((acc, idx) => {
+      const roleBadge = acc.role === 'admin' || isAdminChatId(acc.chatId) ? '👑 MASTER ADMIN' : '👤 USER';
+      const statusBadge =
+        acc.status === 'removed' ? '🔴 REMOVED / BLOCKED' : '🟢 ACTIVE & PROTECTED';
+      const handleStr = acc.username
+        ? acc.username.startsWith('@')
+          ? ` (${acc.username})`
+          : ` (@${acc.username})`
+        : '';
+      const conns = (acc.connectionTypes?.length ? acc.connectionTypes : ['Direct Bot Chat']).join(', ');
+      return (
+        `${idx + 1}. ${acc.displayName}${handleStr} [${roleBadge}]\n` +
+        `   • Chat ID: ${acc.chatId}\n` +
+        `   • Status: ${statusBadge}\n` +
+        `   • Features: ${conns}\n` +
+        `   • Activity: ${acc.totalScans || 0} scans | ${acc.threatsBlocked || 0} threats blocked`
+      );
+    })
+    .join('\n\n');
+
+  const userActionRows: Array<Array<{ text: string; callback_data: string }>> = [];
+  for (const acc of allAccounts) {
+    if (acc.role === 'admin' || isAdminChatId(acc.chatId)) continue;
+    const shortName = acc.displayName.slice(0, 14);
+    if (acc.status === 'removed') {
+      userActionRows.push([
+        {
+          text: `✅ Restore ${shortName} (${acc.chatId})`,
+          callback_data: `adm_restore_${acc.chatId}`,
+        },
+        {
+          text: `📊 Report: ${shortName}`,
+          callback_data: `adm_report_${acc.chatId}`,
+        },
+      ]);
+    } else {
+      userActionRows.push([
+        {
+          text: `🚫 Remove ${shortName} (${acc.chatId})`,
+          callback_data: `adm_remove_${acc.chatId}`,
+        },
+        {
+          text: `📊 Report: ${shortName}`,
+          callback_data: `adm_report_${acc.chatId}`,
+        },
+      ]);
+    }
+  }
+
+  userActionRows.push([
+    { text: '🔄 Refresh Accounts', callback_data: 'cmd_admin' },
+    { text: '📋 All-Accounts Report', callback_data: 'adm_all_report' },
+  ]);
+  userActionRows.push([
+    { text: '🛡️ Health & Status', callback_data: 'cmd_status' },
+    { text: '📊 Weekly Report', callback_data: 'cmd_report' },
+  ]);
+
+  const text =
+    `👑 SENTINELGRAM — MASTER ADMIN CONTROL PANEL\n\n` +
+    `• Admin Account: @NANGSOPHEAK (Chat ID: ${MASTER_ADMIN_CHAT_ID})\n` +
+    `• Total Added Accounts: ${allAccounts.length} (${activeCount} Active, ${removedCount} Removed)\n` +
+    `• Total Threats Intercepted Across All Users: ${totalBlocked}\n\n` +
+    `👥 Connected & Added Telegram Accounts:\n` +
+    `${accountLines}\n\n` +
+    `🛠️ Admin Slash Commands:\n` +
+    `• /admin — Open this Admin Control Panel\n` +
+    `• /remove <chat_id> — Remove & block another user\n` +
+    `• /allow <chat_id> — Restore a removed user\n` +
+    `• /adduser <chat_id> <name> — Add/authorize an account\n\n` +
+    `👇 Tap a button below to remove/restore a user or inspect their report:`;
+
+  return {
+    text,
+    reply_markup: { inline_keyboard: userActionRows },
+  };
+}
+
+function formatAdminUserReport(targetChatId: string): string {
+  if (targetChatId === 'ALL') {
+    const allAccounts = Array.from(managedAccountsMap.values());
+    const recentLogs = persistentDetectionLogs.slice(0, 8);
+    const logLines =
+      recentLogs.length > 0
+        ? recentLogs
+            .map((ev, i) => {
+              const icon = ev.verdict === 'threat_blocked' ? '🛑 [BLOCKED]' : '✅ [CLEAN]';
+              return (
+                `${i + 1}. ${icon} Chat: ${ev.chatTitle}\n` +
+                `   • Item: ${ev.label} (Risk: ${ev.riskScore}/100)\n` +
+                `   • Reason: ${ev.reason}`
+              );
+            })
+            .join('\n\n')
+        : 'No recent logs recorded.';
+
+    return (
+      `📋 ADMIN GLOBAL REPORT — ALL CONNECTED ACCOUNTS\n\n` +
+      `• Monitored Accounts: ${allAccounts.length}\n` +
+      `• Active Users: ${allAccounts.filter((a) => a.status === 'active').length}\n` +
+      `• Removed/Blocked Users: ${allAccounts.filter((a) => a.status === 'removed').length}\n` +
+      `• Total Logged Inspections: ${persistentDetectionLogs.length}\n` +
+      `• Total Threats Blocked: ${persistentDetectionLogs.filter((l) => l.verdict === 'threat_blocked').length}\n\n` +
+      `🕒 Latest Cross-Account Detection Audit:\n` +
+      `${logLines}`
+    );
+  }
+
+  const acc = managedAccountsMap.get(targetChatId.trim());
+  if (!acc) {
+    return `⚠️ Account ${targetChatId} not found in the Admin Registry.`;
+  }
+
+  return (
+    `📊 ADMIN ACCOUNT INSPECTION REPORT\n\n` +
+    `• User Name: ${acc.displayName} ${acc.username ? `(${acc.username})` : ''}\n` +
+    `• Chat ID: ${acc.chatId}\n` +
+    `• Role: ${acc.role === 'admin' ? '👑 MASTER ADMIN' : '👤 USER'}\n` +
+    `• Status: ${acc.status === 'removed' ? '🔴 REMOVED / BLOCKED BY ADMIN' : '🟢 ACTIVE & ALLOWED'}\n` +
+    `• Connected Features: ${(acc.connectionTypes || []).join(', ')}\n` +
+    (acc.businessConnectionId ? `• Business Connection ID: ${acc.businessConnectionId}\n` : '') +
+    `• Total Scans: ${acc.totalScans || 0} | Threats Blocked: ${acc.threatsBlocked || 0}`
+  );
+}
+
 let offset = 0;
 let totalScans = 0;
 let threatsBlocked = 0;
@@ -338,6 +687,98 @@ function telegramPost(method: string, payload: Record<string, unknown>): Promise
     req.write(postData);
     req.end();
   });
+}
+
+async function notifyAdminOfNewAccount(rec: ManagedAccountRecord, connectionLabel: string): Promise<void> {
+  if (isAdminChatId(rec.chatId)) return;
+  try {
+    const handleStr = rec.username
+      ? rec.username.startsWith('@')
+        ? ` (${rec.username})`
+        : ` (@${rec.username})`
+      : '';
+    await telegramPost('sendMessage', {
+      chat_id: MASTER_ADMIN_CHAT_ID,
+      text:
+        `👑 ADMIN SECURITY ALERT — ACCOUNT CONNECTED!\n\n` +
+        `• Account Name: ${rec.displayName}${handleStr}\n` +
+        `• User Chat ID: ${rec.chatId}\n` +
+        `• Feature Added: ${connectionLabel}\n` +
+        `• Current Status: ${rec.status === 'removed' ? '🔴 REMOVED / BLOCKED' : '🟢 ACTIVE & ALLOWED'}\n\n` +
+        `You can inspect this user's activity or remove them immediately using the Admin buttons below:`,
+      reply_markup: {
+        inline_keyboard: [
+          [
+            { text: `🚫 Remove User (${rec.chatId})`, callback_data: `adm_remove_${rec.chatId}` },
+            { text: `📊 User Report (${rec.chatId})`, callback_data: `adm_report_${rec.chatId}` },
+          ],
+          [{ text: '👑 Open Full Admin Control Panel', callback_data: 'cmd_admin' }],
+        ],
+      },
+      link_preview_options: { is_disabled: true },
+    });
+  } catch {}
+}
+
+async function resolveBusinessOwnerChatId(businessConnId: string): Promise<string> {
+  if (!businessConnId) return '';
+  const cached = businessAlertOwnerMap.get(businessConnId);
+  if (cached) {
+    registeredSubscriberChatIds.add(cached);
+    return cached;
+  }
+  try {
+    const res = await telegramPost('getBusinessConnection', {
+      business_connection_id: businessConnId,
+    });
+    if (res?.ok && res.result) {
+      const ownerChatId = String(res.result.user_chat_id || res.result.user?.id || '').trim();
+      const ownerName =
+        [res.result.user?.first_name, res.result.user?.last_name].filter(Boolean).join(' ') ||
+        res.result.user?.username ||
+        `Account ${ownerChatId}`;
+      const ownerUsername = res.result.user?.username ? `@${res.result.user.username}` : '';
+      if (ownerChatId) {
+        businessAlertOwnerMap.set(businessConnId, ownerChatId);
+        const { record, isNewlyAdded } = upsertManagedAccount(ownerChatId, {
+          displayName: ownerName,
+          username: ownerUsername,
+          connectionType: 'Business Chat Automation',
+          businessConnectionId: businessConnId,
+        });
+        if (isNewlyAdded) {
+          void notifyAdminOfNewAccount(record, 'Business Chat Automation');
+        }
+        console.log(`[BUSINESS ROUTING] Resolved business_connection_id ${businessConnId} -> Owner Chat ID ${ownerChatId}`);
+        return ownerChatId;
+      }
+    }
+  } catch (err) {
+    console.warn(`[BUSINESS ROUTING] Failed to query getBusinessConnection for ${businessConnId}:`, err);
+  }
+  return '';
+}
+
+async function resolveGroupAlertTargets(groupChatId: string, fallbackId: string): Promise<string[]> {
+  const mappedOwner = groupAlertOwnerMap.get(groupChatId);
+  if (mappedOwner) {
+    return [mappedOwner];
+  }
+  const targets = new Set<string>();
+  try {
+    const res = await telegramPost('getChatAdministrators', { chat_id: groupChatId });
+    if (res?.ok && Array.isArray(res.result)) {
+      for (const adm of res.result) {
+        if (adm?.user && !adm.user.is_bot && adm.user.id) {
+          targets.add(String(adm.user.id));
+        }
+      }
+    }
+  } catch {}
+  if (targets.size === 0 && fallbackId) {
+    targets.add(fallbackId);
+  }
+  return Array.from(targets);
 }
 
 function evaluateThreat(
@@ -669,24 +1110,54 @@ function formatHelpGuide(): string {
 
 async function handleTelegramMessage(msg: any): Promise<void> {
   const chatId = String(msg.chat?.id || '');
-  const isDirectBotChat = msg.chat?.type === 'private' && !msg.business_connection_id;
+  const chatType = String(msg.chat?.type || 'private');
+  const businessConnId = msg.business_connection_id ? String(msg.business_connection_id) : '';
+  const isDirectBotChat = chatType === 'private' && !businessConnId;
   const senderUser = msg.from?.username ? `@${msg.from.username}` : msg.from?.first_name || 'User';
   const senderUserId = msg.from?.id ? String(msg.from.id) : '';
-  const chatTitle = msg.chat?.title || (isDirectBotChat ? `Direct Chat (${senderUser})` : 'Private Chat');
+  const dmTitle = [msg.chat?.first_name, msg.chat?.last_name].filter(Boolean).join(' ') || msg.chat?.username || 'Private Chat';
+  const chatTitle =
+    msg.chat?.title ||
+    (isDirectBotChat ? `Direct Chat (${senderUser})` : businessConnId ? `${dmTitle} (Personal Chat)` : dmTitle);
   const rawText = (msg.text || msg.caption || '').trim();
   const messageId = msg.message_id;
 
   // Whenever a Telegram account opens or messages the bot in a 1-on-1 direct chat,
-  // synchronize activeAlertChatId so their Chat ID and Alert Destination are identical.
+  // synchronize activeAlertChatId and register them as an active subscriber.
   if (isDirectBotChat && chatId) {
     activeAlertChatId = chatId;
+    const { record, isNewlyAdded } = upsertManagedAccount(chatId, {
+      displayName: dmTitle,
+      username: msg.from?.username ? `@${msg.from.username}` : '',
+      connectionType: 'Direct Bot Chat',
+    });
+    if (isNewlyAdded && !isAdminChatId(chatId)) {
+      void notifyAdminOfNewAccount(record, 'Direct Bot Chat');
+    }
+    if (isUserRevoked(chatId)) {
+      await telegramPost('sendMessage', {
+        chat_id: chatId,
+        text: `⛔ Access Revoked by Administrator\n\nYour Telegram account (Chat ID: ${chatId}) has been removed from @${botInfo?.username || 'mydefz_bot'} by the system administrator.`,
+        link_preview_options: { is_disabled: true },
+      });
+      return;
+    }
   }
+
+  const resolvedBusinessOwner = businessConnId
+    ? await resolveBusinessOwnerChatId(businessConnId)
+    : '';
 
   const resolvedAlertChatId = isDirectBotChat
     ? chatId
-    : msg.business_connection_id && businessAlertOwnerMap.has(String(msg.business_connection_id))
-    ? businessAlertOwnerMap.get(String(msg.business_connection_id))!
-    : groupAlertOwnerMap.get(chatId) || senderUserId || activeAlertChatId;
+    : resolvedBusinessOwner
+    ? resolvedBusinessOwner
+    : groupAlertOwnerMap.get(chatId) || activeAlertChatId;
+
+  if (resolvedAlertChatId && isUserRevoked(resolvedAlertChatId)) {
+    console.log(`[REVOKED USER] Ignoring update for removed user ${resolvedAlertChatId}`);
+    return;
+  }
 
   console.log(`[INCOMING] Update from ${senderUser} in "${chatTitle}" (Chat ID: ${chatId} -> Alert Destination: ${resolvedAlertChatId})`);
 
@@ -712,8 +1183,13 @@ async function handleTelegramMessage(msg: any): Promise<void> {
   }
 
   // 1. Slash commands & Direct chat greetings
-  const isCommand = /^\/(start|help|status|test|ping|scan|check|report|weekly)(\s|$|@)/i.test(rawText);
-  const isDirectGreeting = isDirectBotChat && /^(hi|hello|halo|hey|test|status|help|ping|info|start|report|weekly)\b/i.test(rawText);
+  const isCommand =
+    /^\/(start|help|status|test|ping|scan|check|report|weekly|admin|users|remove|kick|block|allow|restore|unblock|adduser)(\s|$|@)/i.test(
+      rawText
+    );
+  const isDirectGreeting =
+    isDirectBotChat &&
+    /^(hi|hello|halo|hey|test|status|help|ping|info|start|report|weekly|admin|users)\b/i.test(rawText);
 
   if (isCommand || isDirectGreeting) {
     if (!isDirectBotChat && senderUserId && chatId) {
@@ -721,8 +1197,82 @@ async function handleTelegramMessage(msg: any): Promise<void> {
       activeAlertChatId = senderUserId;
     }
 
-    const cmdWord = rawText.toLowerCase().split(/\s+|@/)[0].replace(/^\//, '');
+    const parts = rawText.trim().split(/\s+/);
+    const cmdWord = parts[0].toLowerCase().split('@')[0].replace(/^\//, '');
+    const argTargetId = (parts[1] || '').trim();
+    const argTargetName = parts.slice(2).join(' ').trim();
     const targetReplyChat = isDirectBotChat ? chatId : resolvedAlertChatId;
+
+    if (
+      cmdWord === 'admin' ||
+      cmdWord === 'users' ||
+      cmdWord === 'remove' ||
+      cmdWord === 'kick' ||
+      cmdWord === 'block' ||
+      cmdWord === 'allow' ||
+      cmdWord === 'restore' ||
+      cmdWord === 'unblock' ||
+      cmdWord === 'adduser'
+    ) {
+      if (!isAdminChatId(targetReplyChat)) {
+        await telegramPost('sendMessage', {
+          chat_id: targetReplyChat,
+          text: `⛔ Admin Only: Only the Master Administrator (Chat ID: ${MASTER_ADMIN_CHAT_ID}) can manage users and view global reports.`,
+          reply_markup: getInlineKeyboardForChat(targetReplyChat),
+          link_preview_options: { is_disabled: true },
+        });
+        return;
+      }
+
+      if ((cmdWord === 'remove' || cmdWord === 'kick' || cmdWord === 'block') && argTargetId) {
+        if (!isAdminChatId(argTargetId)) {
+          revokedUserChatIds.add(argTargetId);
+          const existing = managedAccountsMap.get(argTargetId);
+          if (existing) {
+            existing.status = 'removed';
+          } else {
+            upsertManagedAccount(argTargetId, { displayName: `User ${argTargetId}` });
+            managedAccountsMap.get(argTargetId)!.status = 'removed';
+          }
+          saveRoutingMaps();
+          await telegramPost('sendMessage', {
+            chat_id: argTargetId,
+            text: `⛔ SentinelGram Access Removed by Administrator\n\nYour Telegram account (Chat ID: ${argTargetId}) has been removed by the system administrator.`,
+          });
+        }
+      } else if ((cmdWord === 'allow' || cmdWord === 'restore' || cmdWord === 'unblock') && argTargetId) {
+        revokedUserChatIds.delete(argTargetId);
+        const existing = managedAccountsMap.get(argTargetId);
+        if (existing) {
+          existing.status = 'active';
+        } else {
+          upsertManagedAccount(argTargetId, { displayName: argTargetName || `User ${argTargetId}` });
+        }
+        saveRoutingMaps();
+        await telegramPost('sendMessage', {
+          chat_id: argTargetId,
+          text: `✅ SentinelGram Access Restored by Administrator\n\nYour Telegram account (Chat ID: ${argTargetId}) is active again.`,
+          reply_markup: STANDARD_INLINE_KEYBOARD,
+        });
+      } else if (cmdWord === 'adduser' && argTargetId) {
+        revokedUserChatIds.delete(argTargetId);
+        upsertManagedAccount(argTargetId, {
+          displayName: argTargetName || `Authorized User ${argTargetId}`,
+          connectionType: 'Admin Authorized',
+        });
+        managedAccountsMap.get(argTargetId)!.status = 'active';
+        saveRoutingMaps();
+      }
+
+      const panel = formatAdminControlPanel();
+      await telegramPost('sendMessage', {
+        chat_id: targetReplyChat,
+        text: panel.text,
+        reply_markup: panel.reply_markup,
+        link_preview_options: { is_disabled: true },
+      });
+      return;
+    }
 
     let statusReply = '';
     if (cmdWord === 'status') {
@@ -735,14 +1285,18 @@ async function handleTelegramMessage(msg: any): Promise<void> {
       statusReply = formatHelpGuide();
     } else {
       const botName = botInfo?.username || 'mydefz_bot';
+      const adminCmdLine = isAdminChatId(targetReplyChat)
+        ? `• /admin — 👑 Admin Control: Check added accounts, reports & remove users\n`
+        : '';
       statusReply =
         `🛡️ SentinelGram Shield 24/7 is ONLINE & ACTIVE!\n\n` +
         `• Bot Account: @${botName}\n` +
-        `• Your Chat ID: ${targetReplyChat}\n` +
+        `• Your Chat ID: ${targetReplyChat}${isAdminChatId(targetReplyChat) ? ' (👑 Master Admin)' : ''}\n` +
         `• Alert Destination: Chat ID ${targetReplyChat} (Matched ✅)\n` +
         `• Platform: Cloud Worker 24/7 (Render/VPS)\n` +
         `• Total Scans: ${totalScans} | Threats Blocked: ${threatsBlocked}\n\n` +
         `Commands & Features:\n` +
+        adminCmdLine +
         `• /status — View live health, daemon uptime & scan counters\n` +
         `• /report — View weekly detection report & threat audit\n` +
         `• /test — Run immediate ping & engine diagnostic test\n` +
@@ -753,7 +1307,7 @@ async function handleTelegramMessage(msg: any): Promise<void> {
     await telegramPost('sendMessage', {
       chat_id: targetReplyChat,
       text: statusReply,
-      reply_markup: STANDARD_INLINE_KEYBOARD,
+      reply_markup: getInlineKeyboardForChat(targetReplyChat),
       reply_parameters: isDirectBotChat && typeof messageId === 'number' ? { message_id: messageId, allow_sending_without_reply: true } : undefined,
       link_preview_options: { is_disabled: true },
     });
@@ -771,25 +1325,44 @@ async function handleTelegramMessage(msg: any): Promise<void> {
 
   totalScans++;
 
-  // Download up to 128KB header sample for binary verification if fileId exists
+  // Fast-path + cached header sample for binary verification if fileId exists
   let sampleBuf: Buffer | undefined;
   if (fileId && doc) {
-    try {
-      const fileInfo = await telegramPost('getFile', { file_id: fileId });
-      if (fileInfo?.ok && fileInfo.result?.file_path) {
-        const filePath = fileInfo.result.file_path;
-        sampleBuf = await new Promise<Buffer | undefined>((res) => {
-          https.get(`https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`, {
-            headers: { Range: 'bytes=0-131071' },
-          }, (stream) => {
-            const chunks: Buffer[] = [];
-            stream.on('data', (c) => chunks.push(c));
-            stream.on('end', () => res(Buffer.concat(chunks)));
-          }).on('error', () => res(undefined));
-        });
+    const cleanFileName = fileName.toLowerCase().trim();
+    const extParts = cleanFileName.split('.').filter(Boolean);
+    const ext = extParts.length > 1 ? extParts[extParts.length - 1] : '';
+    const isKnownDanger = PROTECTED_EXTENSIONS.has(ext) || DANGEROUS_EXTENSIONS.has(ext);
+    const isLargeConfirmedExecutable = isKnownDanger && (fileSize || 0) > 512 * 1024;
+
+    if (!fileSize || fileSize <= 20 * 1024 * 1024) {
+      try {
+        const fileInfo = await Promise.race([
+          telegramPost('getFile', { file_id: fileId }),
+          new Promise<any>((r) => setTimeout(() => r({ ok: false }), isLargeConfirmedExecutable ? 1100 : 2800)),
+        ]);
+        if (fileInfo?.ok && fileInfo.result?.file_path) {
+          const filePath = fileInfo.result.file_path;
+          const rangeHeader = isLargeConfirmedExecutable ? 'bytes=0-16383' : 'bytes=0-65535';
+          sampleBuf = await new Promise<Buffer | undefined>((res) => {
+            const req = https.get(
+              `https://api.telegram.org/file/bot${BOT_TOKEN}/${filePath}`,
+              { headers: { Range: rangeHeader } },
+              (stream) => {
+                const chunks: Buffer[] = [];
+                stream.on('data', (c) => chunks.push(c));
+                stream.on('end', () => res(Buffer.concat(chunks)));
+              }
+            );
+            req.on('error', () => res(undefined));
+            req.setTimeout(isLargeConfirmedExecutable ? 900 : 2000, () => {
+              req.destroy();
+              res(undefined);
+            });
+          });
+        }
+      } catch {
+        // Non-fatal
       }
-    } catch {
-      // Non-fatal
     }
   }
 
@@ -826,15 +1399,56 @@ async function handleTelegramMessage(msg: any): Promise<void> {
       `⚠️ RECOMMENDATION:\n` +
       `Do NOT open, install, or execute this payload. Sideloaded APKs and executables can steal Telegram session tokens and 2FA credentials.`;
 
-    const targetAlertChat = resolvedAlertChatId || activeAlertChatId;
-    if (targetAlertChat) {
+    const targetAlertChatIds = new Set<string>();
+    if (isDirectBotChat && chatId) {
+      // 1-on-1 Direct Bot Chat: alert ONLY the account chatting with the bot
+      targetAlertChatIds.add(chatId);
+    } else if (businessConnId) {
+      // Telegram Business Chat Automation: alert ONLY the exact account that owns this business_connection_id
+      if (resolvedBusinessOwner) {
+        targetAlertChatIds.add(resolvedBusinessOwner);
+      } else if (resolvedAlertChatId) {
+        targetAlertChatIds.add(resolvedAlertChatId);
+      }
+    } else if (chatType === 'group' || chatType === 'supergroup' || chatType === 'channel') {
+      const groupTargets = await resolveGroupAlertTargets(chatId, resolvedAlertChatId || activeAlertChatId);
+      for (const gt of groupTargets) targetAlertChatIds.add(gt);
+    } else if (resolvedAlertChatId) {
+      targetAlertChatIds.add(resolvedAlertChatId);
+    }
+
+    if (targetAlertChatIds.size === 0 && activeAlertChatId) {
+      targetAlertChatIds.add(activeAlertChatId);
+    }
+
+    const dedupItemKey =
+      fileId ||
+      threat.sha256 ||
+      fileName ||
+      explicitUrls[0] ||
+      rawText.slice(0, 48) ||
+      String(messageId || Date.now());
+    const nowMs = Date.now();
+    for (const [k, ts] of recentAlertDedupMap.entries()) {
+      if (nowMs - ts > 25000) recentAlertDedupMap.delete(k);
+    }
+
+    for (const targetAlertChat of targetAlertChatIds) {
+      const dedupKey = `${targetAlertChat}:${dedupItemKey}`;
+      const lastSentAt = recentAlertDedupMap.get(dedupKey);
+      if (lastSentAt && nowMs - lastSentAt < 20000) {
+        console.log(`[ALERT DEDUP] Skipping duplicate alert within 20s to ${targetAlertChat} for ${dedupItemKey}`);
+        continue;
+      }
+      recentAlertDedupMap.set(dedupKey, nowMs);
+
       await telegramPost('sendMessage', {
         chat_id: targetAlertChat,
         text: alertMessage,
         reply_parameters: isDirectBotChat && typeof messageId === 'number' ? { message_id: messageId, allow_sending_without_reply: true } : undefined,
         link_preview_options: { is_disabled: true },
       });
-      console.log(`[ALERT DELIVERED] Sent threat alert to chat ID: ${targetAlertChat}`);
+      console.log(`[ALERT DELIVERED] Sent threat alert to account chat ID: ${targetAlertChat}`);
     }
   } else if (isDirectBotChat) {
     // Immediate clean feedback in direct 1-on-1 bot chat
@@ -888,7 +1502,9 @@ async function pollTelegramUpdates(): Promise<void> {
       'message',
       'edited_message',
       'channel_post',
+      'edited_channel_post',
       'business_message',
+      'edited_business_message',
       'business_connection',
       'my_chat_member',
       'callback_query',
@@ -907,12 +1523,145 @@ async function pollTelegramUpdates(): Promise<void> {
 
         if (cq.message?.chat?.type === 'private' && cqChatId) {
           activeAlertChatId = cqChatId;
+          registeredSubscriberChatIds.add(cqChatId);
+          saveRoutingMaps();
         }
 
-        await telegramPost('answerCallbackQuery', {
+        if (cqChatId && isUserRevoked(cqChatId)) {
+          void telegramPost('answerCallbackQuery', {
+            callback_query_id: cq.id,
+            text: '⛔ Access revoked by Administrator.',
+            show_alert: true,
+          });
+          continue;
+        }
+
+        void telegramPost('answerCallbackQuery', {
           callback_query_id: cq.id,
-          text: `Displaying ${cqData.replace(/^cmd_/, '')}...`,
+          text: `⚡ ${cqData.replace(/^(cmd_|adm_)/, '').toUpperCase()}`,
         });
+
+        const cqMsgId = typeof cq.message?.message_id === 'number' ? cq.message.message_id : null;
+        const sendOrEditCallbackScreen = async (text: string, reply_markup: any, preferInPlaceEdit = false) => {
+          if (preferInPlaceEdit && cqMsgId) {
+            const editRes = await telegramPost('editMessageText', {
+              chat_id: cqChatId,
+              message_id: cqMsgId,
+              text,
+              reply_markup,
+              link_preview_options: { is_disabled: true },
+            });
+            if (editRes?.ok || String(editRes?.description || '').includes('message is not modified')) {
+              return;
+            }
+          }
+          await telegramPost('sendMessage', {
+            chat_id: cqChatId,
+            text,
+            reply_markup,
+            link_preview_options: { is_disabled: true },
+          });
+        };
+
+        if (cqData === 'cmd_admin' || cqData.startsWith('adm_')) {
+          if (!isAdminChatId(cqChatId)) {
+            await telegramPost('sendMessage', {
+              chat_id: cqChatId,
+              text: `⛔ Admin Only: Only the Master Administrator (Chat ID: ${MASTER_ADMIN_CHAT_ID}) can manage users and global controls.`,
+              reply_markup: getInlineKeyboardForChat(cqChatId),
+            });
+            continue;
+          }
+
+          if (cqData === 'cmd_admin') {
+            const panel = formatAdminControlPanel();
+            await sendOrEditCallbackScreen(panel.text, panel.reply_markup, true);
+            continue;
+          }
+
+          if (cqData === 'adm_all_report') {
+            const reportText = formatAdminUserReport('ALL');
+            const panel = formatAdminControlPanel();
+            await sendOrEditCallbackScreen(reportText, panel.reply_markup, true);
+            continue;
+          }
+
+          if (cqData.startsWith('adm_remove_')) {
+            const targetId = cqData.replace('adm_remove_', '').trim();
+            if (targetId && !isAdminChatId(targetId)) {
+              revokedUserChatIds.add(targetId);
+              const existing = managedAccountsMap.get(targetId);
+              if (existing) {
+                existing.status = 'removed';
+              } else {
+                upsertManagedAccount(targetId, { displayName: `User ${targetId}` });
+                managedAccountsMap.get(targetId)!.status = 'removed';
+              }
+              saveRoutingMaps();
+              const panel = formatAdminControlPanel();
+              await Promise.all([
+                sendOrEditCallbackScreen(
+                  `🚫 User Removed: Account ${existing?.displayName || targetId} (Chat ID: ${targetId}) has been blocked.\n\n${panel.text}`,
+                  panel.reply_markup,
+                  true
+                ),
+                telegramPost('sendMessage', {
+                  chat_id: targetId,
+                  text: `⛔ SentinelGram Access Removed by Administrator\n\nYour Telegram account (Chat ID: ${targetId}) has been removed and disconnected by the administrator.`,
+                  link_preview_options: { is_disabled: true },
+                }),
+              ]);
+            }
+            continue;
+          }
+
+          if (cqData.startsWith('adm_restore_')) {
+            const targetId = cqData.replace('adm_restore_', '').trim();
+            if (targetId) {
+              revokedUserChatIds.delete(targetId);
+              const existing = managedAccountsMap.get(targetId);
+              if (existing) existing.status = 'active';
+              saveRoutingMaps();
+              const panel = formatAdminControlPanel();
+              await Promise.all([
+                sendOrEditCallbackScreen(
+                  `✅ User Restored: Account ${existing?.displayName || targetId} (Chat ID: ${targetId}) is active again.\n\n${panel.text}`,
+                  panel.reply_markup,
+                  true
+                ),
+                telegramPost('sendMessage', {
+                  chat_id: targetId,
+                  text: `✅ SentinelGram Protection Restored by Administrator\n\nYour Telegram account (Chat ID: ${targetId}) is active again.`,
+                  reply_markup: STANDARD_INLINE_KEYBOARD,
+                  link_preview_options: { is_disabled: true },
+                }),
+              ]);
+            }
+            continue;
+          }
+
+          if (cqData.startsWith('adm_report_')) {
+            const targetId = cqData.replace('adm_report_', '').trim();
+            const userReport = formatAdminUserReport(targetId);
+            const acc = managedAccountsMap.get(targetId);
+            const isRem = acc?.status === 'removed';
+            await sendOrEditCallbackScreen(
+              userReport,
+              {
+                inline_keyboard: [
+                  [
+                    isRem
+                      ? { text: `✅ Restore User (${targetId})`, callback_data: `adm_restore_${targetId}` }
+                      : { text: `🚫 Remove User (${targetId})`, callback_data: `adm_remove_${targetId}` },
+                    { text: '👑 Back to Admin Panel', callback_data: 'cmd_admin' },
+                  ],
+                ],
+              },
+              true
+            );
+            continue;
+          }
+        }
 
         let detailText = '';
         if (cqData === 'cmd_status') {
@@ -920,19 +1669,14 @@ async function pollTelegramUpdates(): Promise<void> {
         } else if (cqData === 'cmd_report') {
           detailText = formatWeeklyReport();
         } else if (cqData === 'cmd_test') {
-          detailText = formatDiagnosticTest(Date.now() - 30);
+          detailText = formatDiagnosticTest(Date.now() - 20);
         } else if (cqData === 'cmd_help') {
           detailText = formatHelpGuide();
         }
 
         if (detailText && cqChatId) {
-          await telegramPost('sendMessage', {
-            chat_id: cqChatId,
-            text: detailText,
-            reply_markup: STANDARD_INLINE_KEYBOARD,
-            link_preview_options: { is_disabled: true },
-          });
-          console.log(`[BUTTON CLICK: ${cqData}] Sent detailed report to chat ${cqChatId}`);
+          await sendOrEditCallbackScreen(detailText, getInlineKeyboardForChat(cqChatId), true);
+          console.log(`[BUTTON CLICK: ${cqData}] Updated screen in chat ${cqChatId}`);
         }
         continue;
       }
@@ -941,10 +1685,24 @@ async function pollTelegramUpdates(): Promise<void> {
       if (upd.business_connection) {
         const bc = upd.business_connection;
         const userChatId = bc.user_chat_id ? String(bc.user_chat_id) : bc.user?.id ? String(bc.user.id) : '';
+        const ownerName =
+          [bc.user?.first_name, bc.user?.last_name].filter(Boolean).join(' ') ||
+          bc.user?.username ||
+          `Account ${userChatId}`;
+        const ownerHandle = bc.user?.username ? `@${bc.user.username}` : '';
         if (userChatId) {
           activeAlertChatId = userChatId;
           if (bc.id) businessAlertOwnerMap.set(String(bc.id), userChatId);
-          if (bc.is_enabled) {
+          const { record } = upsertManagedAccount(userChatId, {
+            displayName: ownerName,
+            username: ownerHandle,
+            connectionType: 'Business Chat Automation',
+            businessConnectionId: bc.id ? String(bc.id) : null,
+          });
+          if (bc.is_enabled && !isAdminChatId(userChatId)) {
+            void notifyAdminOfNewAccount(record, 'Business Chat Automation');
+          }
+          if (bc.is_enabled && !isUserRevoked(userChatId)) {
             await telegramPost('sendMessage', {
               chat_id: userChatId,
               text:
@@ -952,7 +1710,7 @@ async function pollTelegramUpdates(): Promise<void> {
                 `• Your Chat ID: ${userChatId}\n` +
                 `• Alert Destination: Chat ID ${userChatId} (Matched ✅)\n\n` +
                 `Your 1-on-1 Telegram DMs are now protected in real time against scam lures, phishing links, and dangerous executable files.`,
-              reply_markup: STANDARD_INLINE_KEYBOARD,
+              reply_markup: getInlineKeyboardForChat(userChatId),
               link_preview_options: { is_disabled: true },
             });
           }
@@ -966,13 +1724,23 @@ async function pollTelegramUpdates(): Promise<void> {
         const groupChatId = String(mcm.chat?.id || '');
         const groupTitle = mcm.chat?.title || 'Telegram Group';
         const adderUserId = mcm.from?.id ? String(mcm.from.id) : '';
+        const adderName = [mcm.from?.first_name, mcm.from?.last_name].filter(Boolean).join(' ') || `User ${adderUserId}`;
+        const adderHandle = mcm.from?.username ? `@${mcm.from.username}` : '';
         const newStatus = String(mcm.new_chat_member?.status || 'member');
         const isLeft = newStatus === 'left' || newStatus === 'kicked';
 
         if (adderUserId && groupChatId) {
           groupAlertOwnerMap.set(groupChatId, adderUserId);
+          const { record } = upsertManagedAccount(adderUserId, {
+            displayName: adderName,
+            username: adderHandle,
+            connectionType: `Group: ${groupTitle}`,
+          });
+          if (!isLeft && !isAdminChatId(adderUserId)) {
+            void notifyAdminOfNewAccount(record, `Group Protection (${groupTitle})`);
+          }
           activeAlertChatId = adderUserId;
-          if (!isLeft) {
+          if (!isLeft && !isUserRevoked(adderUserId)) {
             await telegramPost('sendMessage', {
               chat_id: adderUserId,
               text:
@@ -980,7 +1748,7 @@ async function pollTelegramUpdates(): Promise<void> {
                 `• Your Chat ID: ${adderUserId}\n` +
                 `• Alert Destination: Chat ID ${adderUserId} (Matched ✅)\n` +
                 `• Silent Stealth Mode: Active (All threat alerts from "${groupTitle}" will be sent directly to you here).`,
-              reply_markup: STANDARD_INLINE_KEYBOARD,
+              reply_markup: getInlineKeyboardForChat(adderUserId),
               link_preview_options: { is_disabled: true },
             });
           }
@@ -988,7 +1756,13 @@ async function pollTelegramUpdates(): Promise<void> {
         continue;
       }
 
-      const msg = upd.message || upd.edited_message || upd.channel_post || upd.business_message;
+      const msg =
+        upd.message ||
+        upd.edited_message ||
+        upd.channel_post ||
+        upd.edited_channel_post ||
+        upd.business_message ||
+        upd.edited_business_message;
       if (!msg) continue;
       try {
         await handleTelegramMessage(msg);
@@ -1016,6 +1790,7 @@ async function runLoop() {
     // Register native Telegram bot menu commands
     await telegramPost('setMyCommands', {
       commands: [
+        { command: 'admin', description: 'Admin control: check added accounts, reports & remove users' },
         { command: 'status', description: 'Live health, uptime & scan statistics' },
         { command: 'report', description: 'Weekly detection report & threat audit' },
         { command: 'test', description: 'Interactive latency & engine diagnostic ping' },

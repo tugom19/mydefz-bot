@@ -22,6 +22,7 @@ import {
 import shieldBannerImg from '../assets/images/shield_architecture_banner_1793349287170.jpg';
 import { CloudHeartbeatCard } from './CloudHeartbeatCard';
 import { TelegramWeeklyReportCard } from './TelegramWeeklyReportCard';
+import { AdminAccountsControlCard } from './AdminAccountsControlCard';
 
 interface BotIntegrationViewProps {
   botPolicy: BotPolicyConfig;
@@ -214,6 +215,9 @@ export const BotIntegrationView: React.FC<BotIntegrationViewProps> = ({
           {statusMessage.text}
         </div>
       )}
+
+      {/* Master Admin Account Control & User Management */}
+      <AdminAccountsControlCard />
 
       {/* Connection Credentials & Personal DM Alert Setup */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
