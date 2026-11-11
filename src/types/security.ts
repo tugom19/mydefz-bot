@@ -184,6 +184,10 @@ export interface CloudHeartbeatConfig {
   cronjobExecutionKey?: string;
   selfTargetUrl: string;
   autoKeepaliveSelf: boolean;
+  detectedRenderUrl?: string;
+  isRenderDetected?: boolean;
+  externalRelayActive?: boolean;
+  lastRelayAt?: number | null;
   lastPingAt: number | null;
   lastPingStatus: 'ok' | 'failed' | 'idle';
   totalPingsSent: number;

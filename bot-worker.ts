@@ -833,4 +833,50 @@ server.on('error', (err: NodeJS.ErrnoException) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Health check server listening on http://0.0.0.0:${PORT}`);
   void runLoop();
+
+  // Autonomous 24/7 keepalive loop for Render / Cloud deployment
+  const workerRenderUrl = (process.env.RENDER_EXTERNAL_URL && process.env.RENDER_EXTERNAL_URL.startsWith('http'))
+    ? process.env.RENDER_EXTERNAL_URL.trim().replace(/\/$/, '')
+    : (process.env.RENDER_EXTERNAL_HOSTNAME ? `https://${process.env.RENDER_EXTERNAL_HOSTNAME.trim().replace(/\/$/, '')}` : '');
+
+  if (workerRenderUrl) {
+    console.log(`[RENDER KEEP-ALIVE] Auto-detected Render public endpoint: ${workerRenderUrl}`);
+  }
+
+  setInterval(async () => {
+    const target = workerRenderUrl ? `${workerRenderUrl}/healthz` : `http://127.0.0.1:${PORT}/healthz`;
+    try {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 6000);
+      try {
+        await fetch(target, {
+          headers: { 'User-Agent': 'SentinelGram-WorkerHeartbeat/2.0' },
+          signal: ctrl.signal,
+        });
+      } finally {
+        clearTimeout(t);
+      }
+
+      // If on Render HTTPS, also send external proxy pulse so Render edge load balancer resets idle sleep
+      if (workerRenderUrl && workerRenderUrl.startsWith('https://')) {
+        const relays = [
+          `https://api.allorigins.win/raw?url=${encodeURIComponent(`${workerRenderUrl}/healthz`)}`,
+          `https://corsproxy.io/?url=${encodeURIComponent(`${workerRenderUrl}/healthz`)}`,
+        ];
+        const relay = relays[Math.floor(Math.random() * relays.length)];
+        const rCtrl = new AbortController();
+        const rT = setTimeout(() => rCtrl.abort(), 8000);
+        try {
+          await fetch(relay, {
+            headers: { 'User-Agent': 'SentinelGram-ExternalRelay/2.0' },
+            signal: rCtrl.signal,
+          });
+        } finally {
+          clearTimeout(rT);
+        }
+      }
+    } catch {
+      // Non-blocking
+    }
+  }, 3 * 60 * 1000);
 });

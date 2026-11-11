@@ -134,10 +134,12 @@ function nextMonotonicSeq(): number {
   return globalMonotonicSeq;
 }
 
-// Zero-key public abuse.ch feed caches (URLhaus active URLs/hosts + MalwareBazaar recent SHA-256 hashes + live lookup cache)
+// Zero-key public threat feeds: URLhaus + MalwareBazaar + ThreatFox IOCs + OpenPhish Community
 const urlhausExactSet = new Set<string>();
 const urlhausHostSet = new Set<string>();
 const malwareBazaarSha256Set = new Set<string>();
+const threatFoxIocSet = new Set<string>();
+const openPhishSet = new Set<string>();
 const malwareBazaarLookupCache = new Map<string, { malicious: boolean; family?: string; checkedAt: number }>();
 let abuseChFeedsLastSynced = 0;
 let abuseChFeedsSyncInFlight = false;
@@ -147,12 +149,20 @@ async function refreshAbuseChPublicFeeds(): Promise<void> {
   if (abuseChFeedsLastSynced > 0 && Date.now() - abuseChFeedsLastSynced < 15 * 60 * 1000) return;
   abuseChFeedsSyncInFlight = true;
   try {
-    const [uhRes, mbRes] = await Promise.allSettled([
+    const [uhRes, mbRes, tfRes, opRes] = await Promise.allSettled([
       fetch('https://urlhaus.abuse.ch/downloads/text_recent/', {
         headers: { 'User-Agent': 'SentinelGram-ThreatShield/1.0' },
         signal: AbortSignal.timeout(6000),
       }),
       fetch('https://bazaar.abuse.ch/export/txt/sha256/recent/', {
+        headers: { 'User-Agent': 'SentinelGram-ThreatShield/1.0' },
+        signal: AbortSignal.timeout(6000),
+      }),
+      fetch('https://threatfox.abuse.ch/export/csv/recent/', {
+        headers: { 'User-Agent': 'SentinelGram-ThreatShield/1.0' },
+        signal: AbortSignal.timeout(6000),
+      }),
+      fetch('https://openphish.com/feed.txt', {
         headers: { 'User-Agent': 'SentinelGram-ThreatShield/1.0' },
         signal: AbortSignal.timeout(6000),
       }),
@@ -186,6 +196,29 @@ async function refreshAbuseChPublicFeeds(): Promise<void> {
         if (/^[a-f0-9]{64}$/.test(line)) {
           malwareBazaarSha256Set.add(line);
         }
+      }
+    }
+
+    if (tfRes.status === 'fulfilled' && tfRes.value.ok) {
+      const text = await tfRes.value.text();
+      const lines = text.split(/\r?\n/);
+      threatFoxIocSet.clear();
+      for (const rawLine of lines) {
+        const line = rawLine.trim();
+        if (!line || line.startsWith('#')) continue;
+        const parts = line.split('","').map((p) => p.replace(/^"|"$/g, ''));
+        const ioc = parts[2]?.trim().toLowerCase();
+        if (ioc) threatFoxIocSet.add(ioc);
+      }
+    }
+
+    if (opRes.status === 'fulfilled' && opRes.value.ok) {
+      const text = await opRes.value.text();
+      const lines = text.split(/\r?\n/);
+      openPhishSet.clear();
+      for (const rawLine of lines) {
+        const line = rawLine.trim().toLowerCase();
+        if (line.startsWith('http')) openPhishSet.add(line);
       }
     }
 
@@ -2836,11 +2869,27 @@ interface ServerHeartbeatState {
   cronjobExecutionKey: string;
   selfTargetUrl: string;
   autoKeepaliveSelf: boolean;
+  detectedRenderUrl?: string;
+  isRenderDetected?: boolean;
+  externalRelayActive?: boolean;
+  lastRelayAt?: number | null;
   lastPingAt: number | null;
   lastPingStatus: 'ok' | 'failed' | 'idle';
   totalPingsSent: number;
   recentLogs: HeartbeatLogEntry[];
 }
+
+function detectRenderUrl(): string {
+  if (process.env.RENDER_EXTERNAL_URL && process.env.RENDER_EXTERNAL_URL.startsWith('http')) {
+    return process.env.RENDER_EXTERNAL_URL.trim().replace(/\/$/, '');
+  }
+  if (process.env.RENDER_EXTERNAL_HOSTNAME) {
+    return `https://${process.env.RENDER_EXTERNAL_HOSTNAME.trim().replace(/\/$/, '')}`;
+  }
+  return '';
+}
+
+const autoDetectedRenderUrl = detectRenderUrl();
 
 let serverHeartbeatState: ServerHeartbeatState = {
   enabled: true,
@@ -2848,8 +2897,12 @@ let serverHeartbeatState: ServerHeartbeatState = {
   serviceType: 'self_ping',
   webhookPingUrl: '',
   cronjobExecutionKey: '',
-  selfTargetUrl: '',
+  selfTargetUrl: autoDetectedRenderUrl,
   autoKeepaliveSelf: true,
+  detectedRenderUrl: autoDetectedRenderUrl,
+  isRenderDetected: Boolean(autoDetectedRenderUrl && autoDetectedRenderUrl.includes('.onrender.com')),
+  externalRelayActive: false,
+  lastRelayAt: null,
   lastPingAt: null,
   lastPingStatus: 'idle',
   totalPingsSent: 0,
@@ -2883,6 +2936,18 @@ function saveHeartbeatStateToDisk(): void {
 
 loadHeartbeatStateFromDisk();
 
+if (autoDetectedRenderUrl) {
+  serverHeartbeatState.detectedRenderUrl = autoDetectedRenderUrl;
+  serverHeartbeatState.isRenderDetected = true;
+  if (!serverHeartbeatState.selfTargetUrl || serverHeartbeatState.selfTargetUrl.includes('localhost') || serverHeartbeatState.selfTargetUrl.includes('127.0.0.1')) {
+    serverHeartbeatState.selfTargetUrl = autoDetectedRenderUrl;
+    serverHeartbeatState.enabled = true;
+    serverHeartbeatState.autoKeepaliveSelf = true;
+    serverHeartbeatState.intervalMinutes = 3;
+    saveHeartbeatStateToDisk();
+  }
+}
+
 let heartbeatInFlight = false;
 async function executeHeartbeatPingTick(): Promise<HeartbeatLogEntry | null> {
   if (!serverHeartbeatState.enabled || heartbeatInFlight) return null;
@@ -2896,7 +2961,11 @@ async function executeHeartbeatPingTick(): Promise<HeartbeatLogEntry | null> {
   // Choose target URL: custom webhook ping or self-ping keepalive
   if (serverHeartbeatState.webhookPingUrl && serverHeartbeatState.webhookPingUrl.trim().startsWith('http')) {
     targetUrl = serverHeartbeatState.webhookPingUrl.trim();
-  } else if (serverHeartbeatState.selfTargetUrl && serverHeartbeatState.selfTargetUrl.trim().startsWith('http')) {
+  } else if (
+    serverHeartbeatState.selfTargetUrl &&
+    serverHeartbeatState.selfTargetUrl.trim().startsWith('http') &&
+    !serverHeartbeatState.selfTargetUrl.includes('ais-dev-')
+  ) {
     targetUrl = `${serverHeartbeatState.selfTargetUrl.trim().replace(/\/$/, '')}/healthz`;
     serviceType = 'self_ping';
   } else {
@@ -2950,6 +3019,37 @@ async function executeHeartbeatPingTick(): Promise<HeartbeatLogEntry | null> {
     heartbeatInFlight = false;
   }
 
+  // When pinging an external URL (such as a Render cloud instance), also dispatch an external proxy pulse
+  // so that Render's edge load balancer receives real inbound internet traffic from external IP addresses.
+  // This keeps Render's free tier awake 24/7 without sleeping after 15 minutes!
+  if (targetUrl.startsWith('https://') && !targetUrl.includes('localhost') && !targetUrl.includes('127.0.0.1')) {
+    void (async () => {
+      try {
+        const relayUrls = [
+          `https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`,
+          `https://corsproxy.io/?url=${encodeURIComponent(targetUrl)}`,
+        ];
+        const chosenRelay = relayUrls[Math.floor(Math.random() * relayUrls.length)];
+        const relayCtrl = new AbortController();
+        const relayTimer = setTimeout(() => relayCtrl.abort(), 9000);
+        try {
+          const rRes = await fetch(chosenRelay, {
+            headers: { 'User-Agent': 'SentinelGram-KeepaliveRelay/2.0' },
+            signal: relayCtrl.signal,
+          });
+          if (rRes.ok || rRes.status < 400) {
+            serverHeartbeatState.externalRelayActive = true;
+            serverHeartbeatState.lastRelayAt = Date.now();
+          }
+        } finally {
+          clearTimeout(relayTimer);
+        }
+      } catch {
+        // Non-blocking fallback
+      }
+    })();
+  }
+
   serverHeartbeatState.lastPingAt = timestamp;
   serverHeartbeatState.totalPingsSent += 1;
   serverHeartbeatState.recentLogs.unshift(logEntry);
@@ -2985,6 +3085,37 @@ setInterval(() => {
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '512kb' }));
+
+  // Auto-detect Render external hostname or reverse proxy host from incoming requests
+  app.use((req: Request, _res: Response, next) => {
+    try {
+      const rawHost = (req.headers['x-forwarded-host'] as string) || (req.headers['host'] as string) || '';
+      const host = rawHost.split(',')[0].trim();
+      const proto = (req.headers['x-forwarded-proto'] as string) || (req.secure ? 'https' : 'http');
+      if (
+        host &&
+        !host.includes('localhost') &&
+        !host.includes('127.0.0.1') &&
+        !host.includes('ais-dev-') &&
+        !host.startsWith('10.') &&
+        !host.startsWith('172.') &&
+        !host.startsWith('192.168.')
+      ) {
+        const fullDetected = `${proto}://${host}`.replace(/\/$/, '');
+        if (!serverHeartbeatState.detectedRenderUrl || serverHeartbeatState.selfTargetUrl.includes('localhost') || serverHeartbeatState.selfTargetUrl.includes('127.0.0.1') || !serverHeartbeatState.selfTargetUrl) {
+          serverHeartbeatState.detectedRenderUrl = fullDetected;
+          serverHeartbeatState.isRenderDetected = host.includes('.onrender.com');
+          serverHeartbeatState.selfTargetUrl = fullDetected;
+          serverHeartbeatState.enabled = true;
+          serverHeartbeatState.autoKeepaliveSelf = true;
+          saveHeartbeatStateToDisk();
+        }
+      }
+    } catch {
+      // Non-fatal
+    }
+    next();
+  });
 
   // Prevent Wi-Fi / Mobile Data carrier proxies from caching live tracking API responses
   app.use('/api', (_req: Request, res: Response, next) => {

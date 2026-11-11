@@ -48,11 +48,36 @@ export const CloudHeartbeatCard: React.FC<CloudHeartbeatCardProps> = ({
     }
   };
 
-  const currentAppOrigin = typeof window !== 'undefined' ? window.location.origin : 'https://ais-dev-m5cakb5ccpzubvsfq7x4oy-275514818767.asia-southeast1.run.app';
-  const keepaliveEndpoint = `${currentAppOrigin}/`;
+  const detectedOrOrigin = heartbeat?.detectedRenderUrl || (typeof window !== 'undefined' && window.location.origin ? window.location.origin : '');
+  const keepaliveEndpoint = detectedOrOrigin ? `${detectedOrOrigin.replace(/\/$/, '')}/healthz` : '/healthz';
 
   return (
     <div className="bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 rounded-2xl p-6 space-y-5">
+      {/* Auto-Detection Banner for Render / Cloud */}
+      {(heartbeat?.isRenderDetected || heartbeat?.detectedRenderUrl) && (
+        <div className="p-3.5 rounded-xl bg-gradient-to-r from-emerald-50 to-teal-50 dark:from-emerald-950/40 dark:to-teal-950/30 border border-emerald-200 dark:border-emerald-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+          <div className="space-y-0.5">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+              <span className="font-semibold text-emerald-900 dark:text-emerald-200">
+                Render Cloud Auto-Detected &middot; 24/7 Anti-Sleep Active
+              </span>
+              <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-emerald-100 dark:bg-emerald-900/60 text-emerald-800 dark:text-emerald-300">
+                Zero Cold-Start
+              </span>
+            </div>
+            <p className="text-[11px] text-emerald-800/80 dark:text-emerald-300/80 font-mono truncate max-w-lg">
+              Endpoint: {heartbeat.detectedRenderUrl || heartbeat.selfTargetUrl}
+            </p>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <span className="text-[11px] font-medium text-emerald-700 dark:text-emerald-400 bg-white/70 dark:bg-slate-900/70 px-2 py-1 rounded-lg border border-emerald-200 dark:border-emerald-800">
+              {heartbeat?.externalRelayActive ? '⚡ Dual-Layer Relay Active' : '🔄 Auto-Ping Every 3 min'}
+            </span>
+          </div>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-100 dark:border-slate-800">
         <div className="space-y-1">
@@ -194,7 +219,7 @@ export const CloudHeartbeatCard: React.FC<CloudHeartbeatCardProps> = ({
         </div>
 
         <p className="text-[11px] text-slate-600 dark:text-slate-300 leading-relaxed">
-          To guarantee zero cold-starts when your phone is turned off, add this free lightweight keepalive URL to any external monitor:
+          Render's free tier sleeps after 15 minutes of zero web traffic. SentinelGram now automatically auto-detects your Render URL and pulses every 3 minutes. For 100% external backup, add this endpoint to <strong className="text-sky-800 dark:text-sky-300">Cron-Job.org</strong> or UptimeRobot:
         </p>
 
         <div className="flex items-center gap-2">
@@ -207,9 +232,9 @@ export const CloudHeartbeatCard: React.FC<CloudHeartbeatCardProps> = ({
           <button
             type="button"
             onClick={() => copyUrl(keepaliveEndpoint)}
-            className="min-h-[36px] px-3 py-1 rounded-lg text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white transition-colors shrink-0"
+            className="min-h-[36px] px-3.5 py-1 rounded-lg text-xs font-semibold bg-sky-600 hover:bg-sky-700 text-white transition-colors shrink-0 flex items-center gap-1.5"
           >
-            Copy URL
+            <span>Copy /healthz URL</span>
           </button>
         </div>
 
