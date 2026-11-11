@@ -876,6 +876,243 @@ async function resolveGroupAlertTargets(groupChatId: string, fallbackId: string)
   return Array.from(targets);
 }
 
+function escapeHtml(str: string): string {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+interface ThreatRecommendation {
+  headline: string;
+  details: string;
+  fullPlain: string;
+}
+
+function getTailoredThreatRecommendation(category: string, reason: string, fileName?: string): ThreatRecommendation {
+  const c = (category || '').toLowerCase();
+  const r = (reason || '').toLowerCase();
+  const fn = (fileName || '').toLowerCase();
+
+  // Executables, sideloaded binaries, scripts, APKs, DEX, PE headers
+  if (
+    c === 'executable' ||
+    c === 'apk' ||
+    r.includes('executable') ||
+    r.includes('apk') ||
+    r.includes('pe header') ||
+    r.includes('mz header') ||
+    r.includes('binary') ||
+    r.includes('double extension') ||
+    fn.endsWith('.exe') ||
+    fn.endsWith('.com') ||
+    fn.endsWith('.scr') ||
+    fn.endsWith('.pif') ||
+    fn.endsWith('.bat') ||
+    fn.endsWith('.cmd') ||
+    fn.endsWith('.apk') ||
+    fn.endsWith('.xapk') ||
+    fn.endsWith('.apks') ||
+    fn.endsWith('.apkm') ||
+    fn.endsWith('.dex') ||
+    fn.endsWith('.msi') ||
+    fn.endsWith('.msp') ||
+    fn.endsWith('.js') ||
+    fn.endsWith('.vbs') ||
+    fn.endsWith('.vbe') ||
+    fn.endsWith('.wsf') ||
+    fn.endsWith('.hta') ||
+    fn.endsWith('.lnk') ||
+    fn.endsWith('.ps1') ||
+    fn.endsWith('.cpl')
+  ) {
+    const headline = 'Do NOT open, install, or execute this payload.';
+    const details = 'Sideloaded APKs and executables can steal Telegram session tokens and 2FA credentials.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Office documents with weaponized macros
+  if (
+    c === 'macro' ||
+    r.includes('macro') ||
+    fn.endsWith('.docm') ||
+    fn.endsWith('.xlsm') ||
+    fn.endsWith('.pptm') ||
+    fn.endsWith('.xlsb')
+  ) {
+    const headline = 'Do NOT enable macros or allow editing in this document.';
+    const details = 'Embedded VBA macros execute background malware droppers upon opening.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Multi-format compressed archive droppers
+  if (
+    c === 'archive' ||
+    r.includes('archive') ||
+    fn.endsWith('.zip') ||
+    fn.endsWith('.rar') ||
+    fn.endsWith('.7z') ||
+    fn.endsWith('.tar') ||
+    fn.endsWith('.gz') ||
+    fn.endsWith('.iso') ||
+    fn.endsWith('.img')
+  ) {
+    const headline = 'Do NOT extract or run files inside this compressed archive.';
+    const details = 'Attackers use nested archives to evade anti-virus gateways.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Phishing portals, credential harvesters, unshortened redirect traps
+  if (
+    c === 'phishing' ||
+    c === 'link' ||
+    r.includes('phish') ||
+    r.includes('credential') ||
+    r.includes('fake login') ||
+    r.includes('redirect')
+  ) {
+    const headline = 'Do NOT click or open this link.';
+    const details = 'Phishing portals harvest Telegram authorization codes, passwords, and 2FA secrets.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Crypto drainers & fake giveaways
+  if (
+    c === 'crypto' ||
+    r.includes('crypto') ||
+    r.includes('drainer') ||
+    r.includes('wallet') ||
+    r.includes('giveaway')
+  ) {
+    const headline = 'Do NOT connect your crypto wallet or transfer funds.';
+    const details = 'Malicious smart contracts and drainers instantly empty tokens and NFTs.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Advance-fee scams & impersonation
+  if (
+    c === 'scam' ||
+    r.includes('scam') ||
+    r.includes('social engineering') ||
+    r.includes('advance fee') ||
+    r.includes('tech support')
+  ) {
+    const headline = 'Do NOT reply, follow instructions, or send funds.';
+    const details = 'Impersonators and scam lures trick victims into irreversible cryptocurrency or wire transfers.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  const headline = 'Do NOT open untrusted links, share OTP codes, or execute downloaded attachments.';
+  const details = 'Keep your Telegram session keys safe and report suspicious accounts.';
+  return {
+    headline,
+    details,
+    fullPlain: `${headline}\n${details}`,
+  };
+}
+
+interface SentinelThreatAlertResult {
+  html: string;
+  plain: string;
+  toString(): string;
+}
+
+function buildSentinelThreatAlert(opts: {
+  source: string;
+  sender: string;
+  fileName?: string;
+  flaggedUrl?: string;
+  snippet?: string;
+  riskScore: number;
+  threatReason: string;
+  category: string;
+}): SentinelThreatAlertResult {
+  const rec = getTailoredThreatRecommendation(opts.category, opts.threatReason, opts.fileName);
+
+  let scoreBadgeHtml = `🔴 <b>${opts.riskScore}/100</b> [CRITICAL DANGER]`;
+  let scoreBadgePlain = `🔴 ${opts.riskScore}/100 [CRITICAL DANGER]`;
+  if (opts.riskScore < 75) {
+    scoreBadgeHtml = `🟡 <b>${opts.riskScore}/100</b> [ELEVATED RISK]`;
+    scoreBadgePlain = `🟡 ${opts.riskScore}/100 [ELEVATED RISK]`;
+  } else if (opts.riskScore < 90) {
+    scoreBadgeHtml = `🟠 <b>${opts.riskScore}/100</b> [HIGH RISK]`;
+    scoreBadgePlain = `🟠 ${opts.riskScore}/100 [HIGH RISK]`;
+  }
+
+  const htmlLines: string[] = [
+    `🚨 <b>SENTINELGRAM THREAT DETECTED!</b>`,
+    ``,
+    `• 📍 <b>Source:</b> <code>${escapeHtml(opts.source)}</code>`,
+    `• 👤 <b>Sender:</b> <b>${escapeHtml(opts.sender)}</b>`,
+  ];
+
+  const plainLines: string[] = [
+    `🚨 SENTINELGRAM THREAT DETECTED!`,
+    ``,
+    `• 📍 Source: ${opts.source}`,
+    `• 👤 Sender: ${opts.sender}`,
+  ];
+
+  if (opts.fileName) {
+    htmlLines.push(`• 📁 <b>File:</b> <code>${escapeHtml(opts.fileName)}</code>`);
+    plainLines.push(`• 📁 File: ${opts.fileName}`);
+  }
+  if (opts.flaggedUrl) {
+    htmlLines.push(`• 🔗 <b>Flagged URL:</b> <code>${escapeHtml(opts.flaggedUrl)}</code>`);
+    plainLines.push(`• 🔗 Flagged URL: ${opts.flaggedUrl}`);
+  }
+  if (opts.snippet && !opts.fileName && !opts.flaggedUrl) {
+    htmlLines.push(`• 💬 <b>Message:</b> "${escapeHtml(opts.snippet)}"`);
+    plainLines.push(`• 💬 Message: "${opts.snippet}"`);
+  }
+
+  htmlLines.push(`• 📊 <b>Risk Score:</b> ${scoreBadgeHtml}`);
+  htmlLines.push(`• 🔬 <b>Threat Reason:</b> ${escapeHtml(opts.threatReason)}`);
+  htmlLines.push(``);
+  htmlLines.push(`<blockquote>⚠️ <b>RECOMMENDATION:</b>\n⛔ <b>${escapeHtml(rec.headline)}</b>\n${escapeHtml(rec.details)}</blockquote>`);
+
+  plainLines.push(`• 📊 Risk Score: ${scoreBadgePlain}`);
+  plainLines.push(`• 🔬 Threat Reason: ${opts.threatReason}`);
+  plainLines.push(``);
+  plainLines.push(`⚠️ RECOMMENDATION:`);
+  plainLines.push(`⛔ ${rec.headline}`);
+  plainLines.push(`${rec.details}`);
+
+  const html = htmlLines.join('\n');
+  const plain = plainLines.join('\n');
+
+  return {
+    html,
+    plain,
+    toString: () => plain,
+  };
+}
+
 function evaluateThreat(
   fileName: string,
   mime: string,
@@ -886,6 +1123,7 @@ function evaluateThreat(
   isThreat: boolean;
   riskScore: number;
   reason: string;
+  category: string;
   sha256?: string;
   headerHex?: string;
 } {
@@ -896,6 +1134,7 @@ function evaluateThreat(
 
   let riskScore = 0;
   let reason = '';
+  let category = 'clean';
   let sha256 = '';
   let headerHex = '';
 
@@ -912,21 +1151,26 @@ function evaluateThreat(
   if (hasDoubleExt) {
     riskScore = 95;
     reason = `Disguised executable with double extension (.${prevExt}.${ext})`;
+    category = 'executable';
   } else if (PROTECTED_EXTENSIONS.has(ext)) {
     riskScore = 88;
     reason = `Blocked dangerous executable/installer/script (.${ext})`;
+    category = 'executable';
   } else if (['apk', 'xapk', 'dex'].includes(ext) || mime === 'application/vnd.android.package-archive') {
     riskScore = 88;
     reason = 'Sideloaded Android package (APK/DEX) capable of spyware/OTP theft';
+    category = 'apk';
   } else if (DANGEROUS_EXTENSIONS.has(ext)) {
     riskScore = 80;
     reason = `High-risk executable, macro, or disk container (.${ext})`;
+    category = ['docm', 'xlsm', 'pptm', 'xlsb'].includes(ext) ? 'macro' : 'executable';
   }
 
   // Inspect SHA-256 against abuse.ch MalwareBazaar database
   if (sha256 && malwareBazaarSha256Set.has(sha256)) {
     riskScore = 96;
     reason = 'Confirmed malware SHA-256 binary hash in abuse.ch MalwareBazaar';
+    category = 'executable';
   }
 
   // Inspect magic bytes
@@ -934,9 +1178,11 @@ function evaluateThreat(
     if (headerHex.startsWith('4D5A') && !['exe', 'dll'].includes(ext)) {
       riskScore = 96;
       reason = 'File magic bytes (MZ header) reveal a disguised Windows PE executable';
+      category = 'executable';
     } else if (headerHex.startsWith('7F454C46')) {
       riskScore = 90;
       reason = 'ELF binary header detected (Linux executable dropper)';
+      category = 'executable';
     }
 
     // Inspect archive entries for hidden droppers
@@ -948,6 +1194,7 @@ function evaluateThreat(
       if (dangerousMatch) {
         riskScore = 94;
         reason = `Archive contains hidden executable payload ("${dangerousMatch[0].trim()}")`;
+        category = 'archive';
       }
     }
   }
@@ -961,24 +1208,31 @@ function evaluateThreat(
     if (urlhausExactSet.has(lower)) {
       riskScore = Math.max(riskScore, 95);
       reason = reason || `Active malware payload URL listed on abuse.ch URLhaus (${host})`;
+      category = 'executable';
     } else if (threatFoxIocSet.has(lower) || threatFoxIocSet.has(host)) {
       riskScore = Math.max(riskScore, 94);
       reason = reason || `Confirmed botnet/C2 threat indicator in abuse.ch ThreatFox (${host})`;
+      category = 'executable';
     } else if (openPhishSet.has(lower)) {
       riskScore = Math.max(riskScore, 92);
       reason = reason || `Active zero-day phishing attack verified by OpenPhish (${host})`;
+      category = 'phishing';
     } else if (cryptoScamHostSet.has(host) || cryptoScamHostSet.has(registrable)) {
       riskScore = Math.max(riskScore, 95);
       reason = reason || `Flagged crypto drainer / seed-theft portal on MetaMask & CryptoScamDB (${host})`;
+      category = 'crypto';
     } else if (stevenBlackMalwareSet.has(host) || stevenBlackMalwareSet.has(registrable)) {
       riskScore = Math.max(riskScore, 88);
       reason = reason || `Malware & scam distribution host blocked on StevenBlack Unified Database (${host})`;
+      category = 'phishing';
     } else if (phishingDbHostSet.has(host) || phishingDbHostSet.has(registrable)) {
       riskScore = Math.max(riskScore, 88);
       reason = reason || `Verified phishing website listed in Phishing.Database (${host})`;
+      category = 'phishing';
     } else if (urlhausHostSet.has(host)) {
       riskScore = Math.max(riskScore, 86);
       reason = reason || `Malware distribution host flagged on abuse.ch URLhaus (${host})`;
+      category = 'executable';
     } else if (
       lower.includes('telegram-premium') ||
       lower.includes('gift-telegram') ||
@@ -988,6 +1242,7 @@ function evaluateThreat(
     ) {
       riskScore = Math.max(riskScore, 85);
       reason = reason || `Suspicious phishing/dropper URL detected: ${url.slice(0, 50)}`;
+      category = 'phishing';
     }
   }
 
@@ -1000,6 +1255,7 @@ function evaluateThreat(
   ) {
     riskScore = Math.max(riskScore, 86);
     reason = reason || 'Telegram account ban lure or wallet seed-phrase credential harvester';
+    category = 'phishing';
   } else if (
     /(free\s*telegram\s*stars|claim.*(?:stars|premium)|telegram\s*premium\s*free|claim\s*free\s*nitro|connect\s*wallet\s*to\s*claim)/i.test(
       textLower
@@ -1007,6 +1263,7 @@ function evaluateThreat(
   ) {
     riskScore = Math.max(riskScore, 82);
     reason = reason || 'Fake Telegram Stars / Premium gift or crypto drainer lure';
+    category = 'crypto';
   } else {
     const matchedLure = LURE_KEYWORDS.find((kw) => textLower.includes(kw));
     if (matchedLure && riskScore > 0) {
@@ -1014,6 +1271,7 @@ function evaluateThreat(
     } else if (matchedLure && /https?:\/\/[^\s]+/i.test(textLower)) {
       riskScore = Math.max(riskScore, 65);
       reason = reason || `Urgent financial/account lure containing external link (${matchedLure})`;
+      category = 'scam';
     }
   }
 
@@ -1021,6 +1279,7 @@ function evaluateThreat(
     isThreat: riskScore >= RISK_THRESHOLD,
     riskScore,
     reason: reason || 'Clean verification',
+    category,
     sha256,
     headerHex,
   };
@@ -1531,16 +1790,28 @@ async function handleTelegramMessage(msg: any): Promise<void> {
     threatsBlocked++;
     console.log(`🚨 [THREAT DETECTED] File: ${fileName || 'message/link'} | Risk: ${threat.riskScore} | Sender: ${senderUser}`);
 
-    const alertMessage =
-      `🚨 SENTINELGRAM THREAT DETECTED!\n\n` +
-      `• Source: ${chatTitle}\n` +
-      `• Sender: ${senderUser}\n` +
-      (fileName ? `• File: ${fileName}\n` : '') +
-      (explicitUrls.length > 0 ? `• Flagged URL: ${explicitUrls[0]}\n` : '') +
-      `• Risk Score: ${threat.riskScore}/100\n` +
-      `• Threat Reason: ${threat.reason}\n\n` +
-      `⚠️ RECOMMENDATION:\n` +
-      `Do NOT open, install, or execute this payload. Sideloaded APKs and executables can steal Telegram session tokens and 2FA credentials.`;
+    const sourceChatLabel = isDirectBotChat
+      ? (senderUser ? `${senderUser} (Direct Chat)` : 'Direct Bot Chat')
+      : businessConnId
+      ? (resolvedBusinessOwner
+          ? `${managedAccountsMap.get(resolvedBusinessOwner)?.displayName || chatTitle} (Personal Chat)`
+          : `${chatTitle} (Personal Chat)`)
+      : chatType === 'group' || chatType === 'supergroup'
+      ? `${chatTitle} (Group)`
+      : chatType === 'channel'
+      ? `${chatTitle} (Channel)`
+      : chatTitle;
+
+    const alertMessage = buildSentinelThreatAlert({
+      source: sourceChatLabel,
+      sender: senderUser,
+      fileName: fileName || undefined,
+      flaggedUrl: explicitUrls.length > 0 ? explicitUrls[0] : undefined,
+      snippet: rawText ? rawText.slice(0, 100) : undefined,
+      riskScore: threat.riskScore,
+      threatReason: threat.reason,
+      category: threat.category,
+    });
 
     const targetAlertChatIds = new Set<string>();
     if (isDirectBotChat && chatId) {
@@ -1585,12 +1856,21 @@ async function handleTelegramMessage(msg: any): Promise<void> {
       }
       recentAlertDedupMap.set(dedupKey, nowMs);
 
-      await telegramPost('sendMessage', {
+      let sendRes = await telegramPost('sendMessage', {
         chat_id: targetAlertChat,
-        text: alertMessage,
+        text: alertMessage.html,
+        parse_mode: 'HTML',
         reply_parameters: isDirectBotChat && typeof messageId === 'number' ? { message_id: messageId, allow_sending_without_reply: true } : undefined,
         link_preview_options: { is_disabled: true },
       });
+      if (!sendRes?.ok) {
+        sendRes = await telegramPost('sendMessage', {
+          chat_id: targetAlertChat,
+          text: alertMessage.plain,
+          reply_parameters: isDirectBotChat && typeof messageId === 'number' ? { message_id: messageId, allow_sending_without_reply: true } : undefined,
+          link_preview_options: { is_disabled: true },
+        });
+      }
       console.log(`[ALERT DELIVERED] Sent threat alert to account chat ID: ${targetAlertChat}`);
     }
   } else if (isDirectBotChat) {

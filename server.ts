@@ -3221,33 +3221,241 @@ function quickServerEvaluateThreat(upd: {
   };
 }
 
-function buildFileAlertMessage(
-  senderUsername: string,
-  senderName: string,
-  fileName: string,
-  reason: string,
-  sourceChatLabel?: string
-): string {
-  const userHandle = senderUsername
-    ? senderUsername.startsWith('@')
-      ? senderUsername
-      : `@${senderUsername}`
-    : senderName
-    ? `@${senderName.toLowerCase().replace(/[^a-z0-9_]/g, '_')}`
-    : '@username';
+function escapeHtml(str: string): string {
+  if (!str) return '';
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
 
-  const chatLine = sourceChatLabel ? `Chat: ${sourceChatLabel}\n` : '';
+interface ThreatRecommendation {
+  headline: string;
+  details: string;
+  fullPlain: string;
+}
 
-  return (
-    `⚠️ Suspicious File Detected\n\n` +
-    chatLine +
-    `User: ${userHandle}\n` +
-    `File: ${fileName}\n` +
-    `Reason: ${reason}\n\n` +
-    `Recommendation:\n` +
-    `Do NOT open this file.\n` +
-    `Scan with VirusTotal, MetaDefender, or abuse.ch MalwareBazaar.`
-  );
+function getTailoredThreatRecommendation(category: string, reason: string, fileName?: string): ThreatRecommendation {
+  const c = (category || '').toLowerCase();
+  const r = (reason || '').toLowerCase();
+  const fn = (fileName || '').toLowerCase();
+
+  // Executables, sideloaded binaries, scripts, APKs, DEX, PE headers
+  if (
+    c === 'executable' ||
+    c === 'apk' ||
+    r.includes('executable') ||
+    r.includes('apk') ||
+    r.includes('pe header') ||
+    r.includes('mz header') ||
+    r.includes('binary') ||
+    r.includes('double extension') ||
+    fn.endsWith('.exe') ||
+    fn.endsWith('.com') ||
+    fn.endsWith('.scr') ||
+    fn.endsWith('.pif') ||
+    fn.endsWith('.bat') ||
+    fn.endsWith('.cmd') ||
+    fn.endsWith('.apk') ||
+    fn.endsWith('.xapk') ||
+    fn.endsWith('.apks') ||
+    fn.endsWith('.apkm') ||
+    fn.endsWith('.dex') ||
+    fn.endsWith('.msi') ||
+    fn.endsWith('.msp') ||
+    fn.endsWith('.js') ||
+    fn.endsWith('.vbs') ||
+    fn.endsWith('.vbe') ||
+    fn.endsWith('.wsf') ||
+    fn.endsWith('.hta') ||
+    fn.endsWith('.lnk') ||
+    fn.endsWith('.ps1') ||
+    fn.endsWith('.cpl')
+  ) {
+    const headline = 'Do NOT open, install, or execute this payload.';
+    const details = 'Sideloaded APKs and executables can steal Telegram session tokens and 2FA credentials.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Office documents with weaponized macros
+  if (
+    c === 'macro' ||
+    r.includes('macro') ||
+    fn.endsWith('.docm') ||
+    fn.endsWith('.xlsm') ||
+    fn.endsWith('.pptm') ||
+    fn.endsWith('.xlsb')
+  ) {
+    const headline = 'Do NOT enable macros or allow editing in this document.';
+    const details = 'Embedded VBA macros execute background malware droppers upon opening.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Multi-format compressed archive droppers
+  if (
+    c === 'archive' ||
+    r.includes('archive') ||
+    fn.endsWith('.zip') ||
+    fn.endsWith('.rar') ||
+    fn.endsWith('.7z') ||
+    fn.endsWith('.tar') ||
+    fn.endsWith('.gz') ||
+    fn.endsWith('.iso') ||
+    fn.endsWith('.img')
+  ) {
+    const headline = 'Do NOT extract or run files inside this compressed archive.';
+    const details = 'Attackers use nested archives to evade anti-virus gateways.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Phishing portals, credential harvesters, unshortened redirect traps
+  if (
+    c === 'phishing' ||
+    c === 'link' ||
+    r.includes('phish') ||
+    r.includes('credential') ||
+    r.includes('fake login') ||
+    r.includes('redirect')
+  ) {
+    const headline = 'Do NOT click or open this link.';
+    const details = 'Phishing portals harvest Telegram authorization codes, passwords, and 2FA secrets.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Crypto drainers & fake giveaways
+  if (
+    c === 'crypto' ||
+    r.includes('crypto') ||
+    r.includes('drainer') ||
+    r.includes('wallet') ||
+    r.includes('giveaway')
+  ) {
+    const headline = 'Do NOT connect your crypto wallet or transfer funds.';
+    const details = 'Malicious smart contracts and drainers instantly empty tokens and NFTs.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  // Advance-fee scams & impersonation
+  if (
+    c === 'scam' ||
+    r.includes('scam') ||
+    r.includes('social engineering') ||
+    r.includes('advance fee') ||
+    r.includes('tech support')
+  ) {
+    const headline = 'Do NOT reply, follow instructions, or send funds.';
+    const details = 'Impersonators and scam lures trick victims into irreversible cryptocurrency or wire transfers.';
+    return {
+      headline,
+      details,
+      fullPlain: `${headline}\n${details}`,
+    };
+  }
+
+  const headline = 'Do NOT open untrusted links, share OTP codes, or execute downloaded attachments.';
+  const details = 'Keep your Telegram session keys safe and report suspicious accounts.';
+  return {
+    headline,
+    details,
+    fullPlain: `${headline}\n${details}`,
+  };
+}
+
+interface SentinelThreatAlertResult {
+  html: string;
+  plain: string;
+  toString(): string;
+}
+
+function buildSentinelThreatAlert(opts: {
+  source: string;
+  sender: string;
+  fileName?: string;
+  flaggedUrl?: string;
+  snippet?: string;
+  riskScore: number;
+  threatReason: string;
+  category: string;
+}): SentinelThreatAlertResult {
+  const rec = getTailoredThreatRecommendation(opts.category, opts.threatReason, opts.fileName);
+
+  let scoreBadgeHtml = `🔴 <b>${opts.riskScore}/100</b> [CRITICAL DANGER]`;
+  let scoreBadgePlain = `🔴 ${opts.riskScore}/100 [CRITICAL DANGER]`;
+  if (opts.riskScore < 75) {
+    scoreBadgeHtml = `🟡 <b>${opts.riskScore}/100</b> [ELEVATED RISK]`;
+    scoreBadgePlain = `🟡 ${opts.riskScore}/100 [ELEVATED RISK]`;
+  } else if (opts.riskScore < 90) {
+    scoreBadgeHtml = `🟠 <b>${opts.riskScore}/100</b> [HIGH RISK]`;
+    scoreBadgePlain = `🟠 ${opts.riskScore}/100 [HIGH RISK]`;
+  }
+
+  const htmlLines: string[] = [
+    `🚨 <b>SENTINELGRAM THREAT DETECTED!</b>`,
+    ``,
+    `• 📍 <b>Source:</b> <code>${escapeHtml(opts.source)}</code>`,
+    `• 👤 <b>Sender:</b> <b>${escapeHtml(opts.sender)}</b>`,
+  ];
+
+  const plainLines: string[] = [
+    `🚨 SENTINELGRAM THREAT DETECTED!`,
+    ``,
+    `• 📍 Source: ${opts.source}`,
+    `• 👤 Sender: ${opts.sender}`,
+  ];
+
+  if (opts.fileName) {
+    htmlLines.push(`• 📁 <b>File:</b> <code>${escapeHtml(opts.fileName)}</code>`);
+    plainLines.push(`• 📁 File: ${opts.fileName}`);
+  }
+  if (opts.flaggedUrl) {
+    htmlLines.push(`• 🔗 <b>Flagged URL:</b> <code>${escapeHtml(opts.flaggedUrl)}</code>`);
+    plainLines.push(`• 🔗 Flagged URL: ${opts.flaggedUrl}`);
+  }
+  if (opts.snippet && !opts.fileName && !opts.flaggedUrl) {
+    htmlLines.push(`• 💬 <b>Message:</b> "${escapeHtml(opts.snippet)}"`);
+    plainLines.push(`• 💬 Message: "${opts.snippet}"`);
+  }
+
+  htmlLines.push(`• 📊 <b>Risk Score:</b> ${scoreBadgeHtml}`);
+  htmlLines.push(`• 🔬 <b>Threat Reason:</b> ${escapeHtml(opts.threatReason)}`);
+  htmlLines.push(``);
+  htmlLines.push(`<blockquote>⚠️ <b>RECOMMENDATION:</b>\n⛔ <b>${escapeHtml(rec.headline)}</b>\n${escapeHtml(rec.details)}</blockquote>`);
+
+  plainLines.push(`• 📊 Risk Score: ${scoreBadgePlain}`);
+  plainLines.push(`• 🔬 Threat Reason: ${opts.threatReason}`);
+  plainLines.push(``);
+  plainLines.push(`⚠️ RECOMMENDATION:`);
+  plainLines.push(`⛔ ${rec.headline}`);
+  plainLines.push(`${rec.details}`);
+
+  const html = htmlLines.join('\n');
+  const plain = plainLines.join('\n');
+
+  return {
+    html,
+    plain,
+    toString: () => plain,
+  };
 }
 
 async function refreshGroupBotPermissions(
@@ -4659,34 +4867,40 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
       let serverEnforcement: NormalizedTelegramUpdate['serverEnforcement'] = 'flagged';
 
       const sourceChatLabel = isDirectBotChat
-        ? undefined
+        ? (senderName ? `${senderName} (Direct Chat)` : 'Direct Bot Chat')
         : businessConnId
-        ? `${baseChatTitle} (Personal Chat)`
+        ? (resolvedBusinessOwner
+            ? `${managedAccountsMap.get(resolvedBusinessOwner)?.displayName || baseChatTitle} (Personal Chat)`
+            : `${baseChatTitle} (Personal Chat)`)
         : chatType === 'group' || chatType === 'supergroup'
         ? `${baseChatTitle} (Group)`
         : chatType === 'channel'
         ? `${baseChatTitle} (Channel)`
+        : isForwarded
+        ? `${baseChatTitle} (Forwarded Chat)`
         : baseChatTitle;
 
+      const senderDisplay =
+        senderName && senderUsername
+          ? senderUsername.startsWith('@')
+            ? `${senderName} (${senderUsername})`
+            : `${senderName} (@${senderUsername})`
+          : senderName || (senderUsername ? (senderUsername.startsWith('@') ? senderUsername : `@${senderUsername}`) : 'Unknown User');
+
       const targetFileName = attachment?.fileName || verdict.detectedFileName;
-      const alertBody =
-        verdict.isFileThreat && targetFileName
-          ? buildFileAlertMessage(
-              senderUsername,
-              senderName,
-              targetFileName,
-              verdict.reason,
-              sourceChatLabel
-            )
-          : `⚠️ Suspicious ${verdict.category.toUpperCase()} Detected\n\n` +
-            `User: ${senderUsername || senderName}\n` +
-            `Chat: ${sourceChatLabel || (isForwarded ? `${baseChatTitle} (Forwarded)` : baseChatTitle)}\n` +
-            `Risk Score: ${verdict.riskScore}/100\n` +
-            `Reason: ${verdict.reason}` +
-            (state.e2eeRedactPreviewInWarnings || !text
-              ? ''
-              : `\nSnippet: "${text.slice(0, 120)}"`) +
-            `\n\nRecommendation:\nDo NOT open untrusted links, share OTP codes, or run attachments.`;
+      const flaggedUrl = explicitUrls[0] || undefined;
+      const snippet = state.e2eeRedactPreviewInWarnings || !text ? undefined : text.slice(0, 100);
+
+      const alertBody = buildSentinelThreatAlert({
+        source: sourceChatLabel,
+        sender: senderDisplay,
+        fileName: targetFileName || undefined,
+        flaggedUrl,
+        snippet,
+        riskScore: verdict.riskScore,
+        threatReason: verdict.reason,
+        category: verdict.category,
+      });
 
       // Bot-Only Alert Mode: NEVER send or reply inside third-party Personal DMs (businessConnId) or Group Chats!
       // Resolve all target accounts that should receive this alert in their own private @mydefz_bot chat:
@@ -4749,16 +4963,28 @@ async function pollSingleWatcherTick(state: WatcherRuntimeState): Promise<void> 
           }
           recentAlertDedupMap.set(dedupKey, nowMs);
 
-          const sendRes = await telegramRequest(state.token, 'sendMessage', {
+          let sendRes = await telegramRequest(state.token, 'sendMessage', {
             chat_id: targetChatId,
-            text: alertBody,
+            text: alertBody.html,
+            parse_mode: 'HTML',
             reply_parameters:
               isDirectBotChat && typeof msg.message_id === 'number'
                 ? { message_id: msg.message_id, allow_sending_without_reply: true }
                 : undefined,
             link_preview_options: { is_disabled: true },
           });
-          if (sendRes.ok) {
+          if (!sendRes?.ok) {
+            sendRes = await telegramRequest(state.token, 'sendMessage', {
+              chat_id: targetChatId,
+              text: alertBody.plain,
+              reply_parameters:
+                isDirectBotChat && typeof msg.message_id === 'number'
+                  ? { message_id: msg.message_id, allow_sending_without_reply: true }
+                  : undefined,
+              link_preview_options: { is_disabled: true },
+            });
+          }
+          if (sendRes?.ok) {
             serverAutoResponded = true;
             serverPersonalWarningSent = true;
             serverEnforcement = 'personal_warned';
