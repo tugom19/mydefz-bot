@@ -102,6 +102,25 @@ export interface UserBotPolicyConfig {
   soundAlertEnabled: boolean;
 }
 
+export interface ManagedTelegramAccount {
+  chatId: string;
+  displayName: string;
+  username: string;
+  role: 'admin' | 'user';
+  status: 'active' | 'removed' | 'pending_approval' | 'expired';
+  approvalStatus?: 'approved' | 'pending' | 'rejected' | 'expired';
+  approvedAt?: number | null;
+  expiresAt?: number | null;
+  requestedAt?: number | null;
+  connectionTypes: string[];
+  businessConnectionId?: string | null;
+  addedAt: number;
+  lastActiveAt: number;
+  totalScans: number;
+  threatsBlocked: number;
+  botConfig?: UserBotPolicyConfig;
+}
+
 export interface BotInspectionDiagnostic {
   timestamp: number;
   ownerChatId?: string;

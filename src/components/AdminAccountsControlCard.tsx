@@ -1,6 +1,9 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import {
+  AlertTriangle,
+  Check,
   CheckCircle2,
+  Clock,
   Crown,
   FileWarning,
   Plus,
@@ -8,28 +11,21 @@ import {
   Send,
   ShieldAlert,
   ShieldCheck,
+  Sparkles,
   Trash2,
   UserCheck,
   UserMinus,
   Users,
+  X,
 } from 'lucide-react';
 
-import type { BotInspectionDiagnostic, UserBotPolicyConfig } from '../types/security';
+import type {
+  BotInspectionDiagnostic,
+  ManagedTelegramAccount,
+  UserBotPolicyConfig,
+} from '../types/security';
 
-export interface ManagedTelegramAccount {
-  chatId: string;
-  displayName: string;
-  username: string;
-  role: 'admin' | 'user';
-  status: 'active' | 'removed';
-  connectionTypes: string[];
-  businessConnectionId?: string | null;
-  addedAt: number;
-  lastActiveAt: number;
-  totalScans: number;
-  threatsBlocked: number;
-  botConfig?: UserBotPolicyConfig;
-}
+export type { ManagedTelegramAccount };
 
 export interface AdminAccountsResponse {
   ok: boolean;
@@ -43,7 +39,7 @@ export interface AdminAccountsResponse {
     totalInspections: number;
     totalThreatsBlocked: number;
   };
-}
+};
 
 interface AdminAccountsControlCardProps {
   selectedContextChatId?: string;
@@ -96,7 +92,7 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
 
   const handleUserStatusAction = async (
     targetChatId: string,
-    action: 'remove' | 'restore' | 'delete'
+    action: 'remove' | 'restore' | 'delete' | 'approve_30d' | 'renew_30d' | 'reject'
   ) => {
     setActionBusyId(`${targetChatId}:${action}`);
     setFeedback(null);
@@ -104,14 +100,52 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
     // Instant 0ms optimistic UI update
     const previousData = data;
     if (data) {
+      const now = Date.now();
+      const thirtyDays = 30 * 24 * 60 * 60 * 1000;
       const nextAccounts =
         action === 'delete'
           ? data.accounts.filter((a) => a.chatId !== targetChatId)
-          : data.accounts.map((a) =>
-              a.chatId === targetChatId
-                ? { ...a, status: (action === 'remove' ? 'removed' : 'active') as 'removed' | 'active' }
-                : a
-            );
+          : data.accounts.map((a) => {
+              if (a.chatId !== targetChatId) return a;
+              if (action === 'approve_30d') {
+                return {
+                  ...a,
+                  status: 'active' as const,
+                  approvalStatus: 'approved' as const,
+                  approvedAt: now,
+                  expiresAt: now + thirtyDays,
+                };
+              }
+              if (action === 'renew_30d') {
+                const base = Math.max(now, a.expiresAt && a.expiresAt > now ? a.expiresAt : now);
+                return {
+                  ...a,
+                  status: 'active' as const,
+                  approvalStatus: 'approved' as const,
+                  expiresAt: base + thirtyDays,
+                };
+              }
+              if (action === 'reject') {
+                return {
+                  ...a,
+                  status: 'removed' as const,
+                  approvalStatus: 'rejected' as const,
+                };
+              }
+              if (action === 'remove') {
+                return {
+                  ...a,
+                  status: 'removed' as const,
+                };
+              }
+              if (action === 'restore') {
+                return {
+                  ...a,
+                  status: 'active' as const,
+                };
+              }
+              return a;
+            });
       setData({ ...data, accounts: nextAccounts });
     }
 
@@ -282,32 +316,131 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
       )}
 
       {/* Summary KPI Bar */}
-      <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-        <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200/70 dark:border-slate-800">
-          <div className="text-xs text-slate-500 dark:text-slate-400">Total Added Accounts</div>
-          <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 mt-1">
-            {accounts.length}
+      {(() => {
+        const pendingCount = accounts.filter(
+          (a) => a.status === 'pending_approval' || a.approvalStatus === 'pending'
+        ).length;
+        const activeCount = accounts.filter((a) => a.status === 'active').length;
+        const expiredCount = accounts.filter((a) => a.status === 'expired').length;
+        const removedCount = accounts.filter((a) => a.status === 'removed').length;
+
+        return (
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
+            <div className="p-4 rounded-xl bg-slate-50 dark:bg-slate-800/50 border border-slate-200/70 dark:border-slate-800">
+              <div className="text-xs text-slate-500 dark:text-slate-400">Total Added Accounts</div>
+              <div className="text-2xl font-bold text-slate-900 dark:text-slate-100 mt-1">
+                {accounts.length}
+              </div>
+            </div>
+            <div className="p-4 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/70 dark:border-emerald-900/50">
+              <div className="text-xs text-emerald-700 dark:text-emerald-300">Active (30-Day Shield)</div>
+              <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-300 mt-1">
+                {activeCount}
+              </div>
+            </div>
+            <div
+              className={`p-4 rounded-xl border ${
+                pendingCount > 0
+                  ? 'bg-amber-100/70 dark:bg-amber-950/40 border-amber-300 dark:border-amber-800 animate-pulse'
+                  : 'bg-slate-50 dark:bg-slate-800/50 border-slate-200/70 dark:border-slate-800'
+              }`}
+            >
+              <div className="text-xs font-semibold text-amber-800 dark:text-amber-300 flex items-center gap-1.5">
+                <Clock className="w-3.5 h-3.5" />
+                <span>Pending Approvals</span>
+              </div>
+              <div className="text-2xl font-bold text-amber-800 dark:text-amber-300 mt-1">
+                {pendingCount}
+              </div>
+            </div>
+            <div className="p-4 rounded-xl bg-rose-50/60 dark:bg-rose-950/20 border border-rose-200/70 dark:border-rose-900/50">
+              <div className="text-xs text-rose-700 dark:text-rose-300">Expired / Removed</div>
+              <div className="text-2xl font-bold text-rose-700 dark:text-rose-300 mt-1">
+                {expiredCount + removedCount}
+              </div>
+            </div>
           </div>
-        </div>
-        <div className="p-4 rounded-xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-200/70 dark:border-emerald-900/50">
-          <div className="text-xs text-emerald-700 dark:text-emerald-300">Active &amp; Protected</div>
-          <div className="text-2xl font-bold text-emerald-700 dark:text-emerald-300 mt-1">
-            {accounts.filter((a) => a.status === 'active').length}
+        );
+      })()}
+
+      {/* Dedicated Pending Approval Queue */}
+      {(() => {
+        const pendingAccounts = accounts.filter(
+          (a) => a.status === 'pending_approval' || a.approvalStatus === 'pending'
+        );
+        if (pendingAccounts.length === 0) return null;
+
+        return (
+          <div className="p-4 sm:p-5 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border-2 border-amber-300 dark:border-amber-800/80 space-y-3.5">
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+              <div className="flex items-center gap-2 text-amber-900 dark:text-amber-200 font-bold text-sm sm:text-base">
+                <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0" />
+                <span>Pending Account Approval Queue ({pendingAccounts.length} Awaiting Review)</span>
+              </div>
+              <span className="text-xs font-medium text-amber-800 dark:text-amber-300 bg-amber-100 dark:bg-amber-900/50 px-2.5 py-1 rounded-full">
+                1 Approval = 30 Days Protection
+              </span>
+            </div>
+            <p className="text-xs text-amber-800 dark:text-amber-300 leading-relaxed">
+              These users connected <span className="font-mono">@mydefz_bot</span> to Telegram Chat Automation.
+              Confirm payment with the user before granting their 30-day 14-layer virus &amp; scam protection license.
+            </p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 pt-1">
+              {pendingAccounts.map((p) => {
+                const isBusy = actionBusyId?.startsWith(p.chatId);
+                return (
+                  <div
+                    key={p.chatId}
+                    className="p-3.5 rounded-xl bg-white dark:bg-slate-900 border border-amber-200 dark:border-amber-800/60 flex flex-col justify-between gap-3 shadow-xs"
+                  >
+                    <div>
+                      <div className="flex items-center justify-between">
+                        <span className="font-bold text-slate-900 dark:text-slate-100 text-sm">
+                          {p.displayName}
+                        </span>
+                        <span className="text-[11px] font-mono text-amber-700 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/50 px-2 py-0.5 rounded border border-amber-200 dark:border-amber-900">
+                          ID: {p.chatId}
+                        </span>
+                      </div>
+                      {p.username && (
+                        <div className="text-xs text-slate-500 dark:text-slate-400 font-mono">
+                          {p.username.startsWith('@') ? p.username : `@${p.username}`}
+                        </div>
+                      )}
+                      <div className="text-xs text-slate-600 dark:text-slate-300 mt-1.5 flex items-center gap-1.5">
+                        <Clock className="w-3.5 h-3.5 text-slate-400" />
+                        <span>Requested: {new Date(p.requestedAt || p.addedAt).toLocaleTimeString()}</span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-2 pt-1 border-t border-slate-100 dark:border-slate-800">
+                      <button
+                        type="button"
+                        onClick={() => handleUserStatusAction(p.chatId, 'approve_30d')}
+                        disabled={isBusy}
+                        className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-xs transition-colors"
+                      >
+                        <Check className="w-3.5 h-3.5" />
+                        <span>Approve 30 Days</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleUserStatusAction(p.chatId, 'reject')}
+                        disabled={isBusy}
+                        className="inline-flex items-center justify-center gap-1 px-3 py-2 rounded-xl text-xs font-semibold bg-rose-50 hover:bg-rose-100 dark:bg-rose-950/50 dark:hover:bg-rose-900/50 text-rose-700 dark:text-rose-300 border border-rose-200 dark:border-rose-800 transition-colors"
+                      >
+                        <X className="w-3.5 h-3.5" />
+                        <span>Reject</span>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
           </div>
-        </div>
-        <div className="p-4 rounded-xl bg-rose-50/60 dark:bg-rose-950/20 border border-rose-200/70 dark:border-rose-900/50">
-          <div className="text-xs text-rose-700 dark:text-rose-300">Removed / Blocked Users</div>
-          <div className="text-2xl font-bold text-rose-700 dark:text-rose-300 mt-1">
-            {accounts.filter((a) => a.status === 'removed').length}
-          </div>
-        </div>
-        <div className="p-4 rounded-xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-200/70 dark:border-amber-900/50">
-          <div className="text-xs text-amber-700 dark:text-amber-300">Telegram Admin Command</div>
-          <div className="text-sm font-mono font-bold text-amber-800 dark:text-amber-300 mt-1.5">
-            /admin · /remove &lt;id&gt;
-          </div>
-        </div>
-      </div>
+        );
+      })()}
 
       {/* Accounts Table */}
       <div className="space-y-3">
@@ -317,7 +450,7 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
             <span>Added &amp; Connected Telegram Accounts</span>
           </h3>
           <span className="text-xs text-slate-500 dark:text-slate-400">
-            Alerts route strictly to each active account&apos;s own Chat ID
+            1 Approval = 30 Days · Alert sent 5 days before expiration
           </span>
         </div>
 
@@ -327,7 +460,7 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
               <tr className="bg-slate-50 dark:bg-slate-800/60 text-slate-600 dark:text-slate-300 border-b border-slate-200 dark:border-slate-800">
                 <th className="py-3 px-4 font-semibold">Account &amp; Role</th>
                 <th className="py-3 px-4 font-semibold">Chat ID (Alert Target)</th>
-                <th className="py-3 px-4 font-semibold">Connected Features</th>
+                <th className="py-3 px-4 font-semibold">Subscription &amp; Term</th>
                 <th className="py-3 px-4 font-semibold">Activity &amp; Threats</th>
                 <th className="py-3 px-4 font-semibold">Status</th>
                 <th className="py-3 px-4 font-semibold text-right">Admin Actions</th>
@@ -336,13 +469,31 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
             <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
               {accounts.map((acc) => {
                 const isMasterAdmin = acc.role === 'admin' || acc.chatId === adminChatId;
-                const isRemoved = acc.status === 'removed';
+                const isPending = acc.status === 'pending_approval' || acc.approvalStatus === 'pending';
+                const isExpired = acc.status === 'expired' || (acc.expiresAt ? Date.now() > acc.expiresAt : false);
+                const isRemoved = acc.status === 'removed' || acc.approvalStatus === 'rejected';
+
+                const daysRemaining = acc.expiresAt
+                  ? Math.max(0, Math.ceil((acc.expiresAt - Date.now()) / (24 * 3600 * 1000)))
+                  : null;
+                const expiryFormatted = acc.expiresAt
+                  ? new Date(acc.expiresAt).toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                    })
+                  : null;
+
                 return (
                   <tr
                     key={acc.chatId}
                     className={`${
-                      isRemoved
+                      isPending
+                        ? 'bg-amber-50/40 dark:bg-amber-950/20'
+                        : isRemoved
                         ? 'bg-rose-50/30 dark:bg-rose-950/10 opacity-75'
+                        : isExpired
+                        ? 'bg-orange-50/30 dark:bg-orange-950/10'
                         : 'hover:bg-slate-50/70 dark:hover:bg-slate-800/30'
                     }`}
                   >
@@ -379,19 +530,38 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
                     </td>
 
                     <td className="py-3.5 px-4">
-                      <div className="flex flex-wrap gap-1">
-                        {(acc.connectionTypes?.length
-                          ? acc.connectionTypes
-                          : ['Direct Bot Chat']
-                        ).map((ct) => (
-                          <span
-                            key={ct}
-                            className="px-2 py-0.5 rounded bg-sky-50 dark:bg-sky-950/50 text-sky-700 dark:text-sky-300 border border-sky-200/60 dark:border-sky-800/60 text-[11px]"
-                          >
-                            {ct}
-                          </span>
-                        ))}
-                      </div>
+                      {isMasterAdmin ? (
+                        <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
+                          Permanent Access
+                        </span>
+                      ) : isPending ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-amber-700 dark:text-amber-300">
+                          <Clock className="w-3.5 h-3.5" />
+                          Requested 30-Day Plan
+                        </span>
+                      ) : isExpired ? (
+                        <span className="inline-flex items-center gap-1 text-xs font-semibold text-rose-600 dark:text-rose-400">
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          Term Ended ({expiryFormatted})
+                        </span>
+                      ) : daysRemaining !== null ? (
+                        <div>
+                          <div className="flex items-center gap-1 text-xs font-semibold text-slate-800 dark:text-slate-200">
+                            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+                            <span>{daysRemaining} Days Left</span>
+                            {daysRemaining <= 5 && (
+                              <span className="px-1.5 py-0.2 rounded text-[10px] font-bold bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300">
+                                5d Alert
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-500 dark:text-slate-400">
+                            Expires: {expiryFormatted}
+                          </div>
+                        </div>
+                      ) : (
+                        <span className="text-xs text-slate-500">Standard</span>
+                      )}
                     </td>
 
                     <td className="py-3.5 px-4">
@@ -414,10 +584,20 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
                     </td>
 
                     <td className="py-3.5 px-4">
-                      {isRemoved ? (
+                      {isPending ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-amber-100 dark:bg-amber-950/60 text-amber-800 dark:text-amber-300 border border-amber-300/60 dark:border-amber-800">
+                          <Clock className="w-3.5 h-3.5" />
+                          Pending Approval
+                        </span>
+                      ) : isRemoved ? (
                         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-rose-100 dark:bg-rose-950/60 text-rose-700 dark:text-rose-300">
                           <ShieldAlert className="w-3.5 h-3.5" />
                           Removed / Blocked
+                        </span>
+                      ) : isExpired ? (
+                        <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-orange-100 dark:bg-orange-950/60 text-orange-800 dark:text-orange-300">
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          Expired (Unprotected)
                         </span>
                       ) : (
                         <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold bg-emerald-100 dark:bg-emerald-950/60 text-emerald-700 dark:text-emerald-300">
@@ -428,35 +608,57 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
                     </td>
 
                     <td className="py-3.5 px-4 text-right">
-                      <div className="inline-flex items-center justify-end gap-2 flex-wrap">
+                      <div className="inline-flex items-center justify-end gap-1.5 flex-wrap">
                         {onSelectContextChatId && (
                           <button
                             type="button"
                             onClick={() => onSelectContextChatId(acc.chatId)}
-                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
+                            className={`inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold transition-colors ${
                               selectedContextChatId === acc.chatId
-                                ? 'bg-sky-600 text-white shadow-sm'
+                                ? 'bg-sky-600 text-white shadow-xs'
                                 : 'bg-sky-50 hover:bg-sky-100 dark:bg-sky-950/60 dark:hover:bg-sky-900/60 text-sky-700 dark:text-sky-300 border border-sky-200 dark:border-sky-800'
                             }`}
                           >
                             <span>
-                              {selectedContextChatId === acc.chatId ? '✓ Active Context' : 'Switch Context'}
+                              {selectedContextChatId === acc.chatId ? '✓ Context' : 'Context'}
                             </span>
                           </button>
                         )}
+
                         <button
                           type="button"
                           onClick={() => handleViewUserReport(acc)}
                           disabled={actionBusyId === `${acc.chatId}:report`}
-                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-medium bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors"
+                          className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-200 transition-colors"
                         >
                           <FileWarning className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
-                          <span>Check Report</span>
+                          <span>Report</span>
                         </button>
 
                         {!isMasterAdmin && (
                           <>
-                            {isRemoved ? (
+                            {isPending ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUserStatusAction(acc.chatId, 'approve_30d')}
+                                  disabled={actionBusyId?.startsWith(acc.chatId)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+                                >
+                                  <Check className="w-3.5 h-3.5" />
+                                  <span>Approve 30d</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUserStatusAction(acc.chatId, 'reject')}
+                                  disabled={actionBusyId?.startsWith(acc.chatId)}
+                                  className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold bg-rose-50 hover:bg-rose-100 text-rose-700 dark:bg-rose-950/60 dark:text-rose-300 border border-rose-200 dark:border-rose-800 transition-colors"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                  <span>Reject</span>
+                                </button>
+                              </>
+                            ) : isRemoved ? (
                               <button
                                 type="button"
                                 onClick={() => handleUserStatusAction(acc.chatId, 'restore')}
@@ -464,18 +666,51 @@ export const AdminAccountsControlCard: React.FC<AdminAccountsControlCardProps> =
                                 className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
                               >
                                 <UserCheck className="w-3.5 h-3.5" />
-                                <span>Restore User</span>
+                                <span>Restore</span>
                               </button>
+                            ) : isExpired ? (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUserStatusAction(acc.chatId, 'renew_30d')}
+                                  disabled={actionBusyId?.startsWith(acc.chatId)}
+                                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white transition-colors"
+                                >
+                                  <Sparkles className="w-3.5 h-3.5" />
+                                  <span>Renew 30d</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUserStatusAction(acc.chatId, 'remove')}
+                                  disabled={actionBusyId === `${acc.chatId}:remove`}
+                                  className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white transition-colors"
+                                >
+                                  <UserMinus className="w-3.5 h-3.5" />
+                                  <span>Remove</span>
+                                </button>
+                              </>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => handleUserStatusAction(acc.chatId, 'remove')}
-                                disabled={actionBusyId === `${acc.chatId}:remove`}
-                                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white transition-colors"
-                              >
-                                <UserMinus className="w-3.5 h-3.5" />
-                                <span>Remove User</span>
-                              </button>
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUserStatusAction(acc.chatId, 'renew_30d')}
+                                  disabled={actionBusyId?.startsWith(acc.chatId)}
+                                  title="Extend protection by 30 days"
+                                  className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold bg-emerald-50 hover:bg-emerald-100 dark:bg-emerald-950/60 dark:hover:bg-emerald-900/60 text-emerald-700 dark:text-emerald-300 border border-emerald-200 dark:border-emerald-800 transition-colors"
+                                >
+                                  <Plus className="w-3.5 h-3.5" />
+                                  <span>+30d</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => handleUserStatusAction(acc.chatId, 'remove')}
+                                  disabled={actionBusyId === `${acc.chatId}:remove`}
+                                  className="inline-flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-semibold bg-rose-600 hover:bg-rose-500 text-white transition-colors"
+                                >
+                                  <UserMinus className="w-3.5 h-3.5" />
+                                  <span>Remove</span>
+                                </button>
+                              </>
                             )}
 
                             <button

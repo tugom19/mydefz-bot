@@ -86,6 +86,37 @@ export const THREAT_TEST_SCENARIOS = [
     text: 'URGENT: Your Telegram account will be terminated in 24 hours due to suspicious login. Verify session and 5-digit SMS login code at https://telegram-security-verify.xyz/auth',
     attachment: null,
   },
+  {
+    label: 'Layer 11: Masked Shortened Phishing Link (bit.ly)',
+    chatTitle: 'Direct Message',
+    chatType: ChatSourceType.Private,
+    senderName: 'Airdrop Bot',
+    senderUsername: '@airdrop_claim_bot',
+    text: 'Special VIP Telegram Stars reward! Claim bonus via short link: https://bit.ly/tg-stars-free-claim',
+    attachment: null,
+  },
+  {
+    label: 'Layer 13: Advance-Fee Crypto Transfer Trap',
+    chatTitle: 'Crypto Trading Chat',
+    chatType: ChatSourceType.Supergroup,
+    senderName: 'VIP Signals Desk',
+    senderUsername: '@vip_crypto_signals',
+    text: 'Send 0.1 ETH to 0x71C849479b6d859F58bC536f947F52d6aE5c57b9 to verify your wallet and receive 1.0 ETH instant airdrop payout.',
+    attachment: null,
+  },
+  {
+    label: 'Layer 14: Oversized 28MB Dropper Archive',
+    chatTitle: 'Private DM',
+    chatType: ChatSourceType.Private,
+    senderName: 'Unknown Contributor',
+    senderUsername: '@file_share_dm',
+    text: 'Here is the full 28MB patched release archive. Extract with password "1234".',
+    attachment: {
+      fileName: 'Security_Update_Full_Release.zip',
+      mimeType: 'application/zip',
+      fileSize: 29360128,
+    },
+  },
 ];
 
 export async function generateInitialBaselineEvents(): Promise<ThreatEvent[]> {

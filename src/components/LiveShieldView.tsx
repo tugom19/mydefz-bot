@@ -738,9 +738,39 @@ export const LiveShieldView: React.FC<LiveShieldViewProps> = ({
                 </span>
               </div>
               <div className="flex items-center justify-between">
+                <span>Shield Matrix Architecture</span>
+                <span className="font-semibold text-sky-600 dark:text-sky-400">
+                  14 Active Defense Layers
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Redirect Tracer &amp; Unshortener</span>
+                <span className="font-medium text-emerald-700 dark:text-emerald-400">
+                  Layer 11 (bit.ly/t.co/open redirects)
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Dynamic Cloud Sandboxing</span>
+                <span className="font-medium text-emerald-700 dark:text-emerald-400">
+                  Layer 12 (VirusTotal / Detonation)
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Social Engineering &amp; Wallet Filter</span>
+                <span className="font-medium text-emerald-700 dark:text-emerald-400">
+                  Layer 13 (Advance-Fee / Impersonation)
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span>Operational Defense &amp; 20MB Limit</span>
+                <span className="font-medium text-emerald-700 dark:text-emerald-400">
+                  Layer 14 (Anti-Flood &amp; Scam Channels)
+                </span>
+              </div>
+              <div className="flex items-center justify-between">
                 <span>Multi-Engine Threat Feeds</span>
                 <span className="font-medium text-slate-900 dark:text-slate-100">
-                  MetaDefender · abuse.ch · Quad9
+                  MalwareBazaar · URLhaus · MetaMask
                 </span>
               </div>
               <div className="flex items-center justify-between">

@@ -1033,8 +1033,27 @@ class OnDeviceNaiveBayesClassifier {
 
     const lowerText = text.toLowerCase();
     const matchedTextLures = SUSPICIOUS_LURE_KEYWORDS.filter((kw) => lowerText.includes(kw));
+
+    // Layer 13: Social Engineering & Advanced Text Scam Patterns
+    let socialEngBoost = 0;
+    const socialEngSignals: string[] = [];
+    if (/(?:send|transfer|deposit|pay)\s*(?:0?\.\d+|\d+)\s*(?:eth|btc|usdt|ton|trx|sol|bnb)\s*(?:to|for)\s*(?:verify|double|receive|activate|unlock|gas|airdrop)/i.test(text)) {
+      socialEngBoost = Math.max(socialEngBoost, 94);
+      socialEngSignals.push('Advance-fee crypto transfer trap ("Send crypto to verify wallet")');
+    }
+    if (/(?:tech\s*support|customer\s*support|telegram\s*helpdesk|official\s*support|account\s*specialist).*?(?:message|contact|dm|chat\s*with)\s*@([a-z0-9_]{3,32})/i.test(text)) {
+      socialEngBoost = Math.max(socialEngBoost, 88);
+      socialEngSignals.push('Impersonation of Telegram support redirecting to fraudulent @username');
+    }
+    if (/\b(?:0x[a-fA-F0-9]{40}|[13][a-km-zA-HJ-NP-Z1-9]{25,34}|bc1[a-z0-9]{38,59}|T[A-Za-z1-9]{33}|EQ[A-Za-z0-9_-]{46})\b/.test(text) && /(?:send|transfer|deposit|pay|airdrop|double|profit|verify)/i.test(lowerText)) {
+      socialEngBoost = Math.max(socialEngBoost, 91);
+      socialEngSignals.push('Cryptocurrency wallet address embedded in payment/verification trap');
+    }
+
     const lureBoostScore =
-      matchedTextLures.length >= 3
+      socialEngBoost > 0
+        ? socialEngBoost
+        : matchedTextLures.length >= 3
         ? 78
         : matchedTextLures.length === 2
         ? 64
@@ -1075,6 +1094,9 @@ class OnDeviceNaiveBayesClassifier {
     else if (overallRiskScore >= 25) severity = ThreatSeverity.Low;
 
     const explanation: string[] = [];
+    if (socialEngSignals.length > 0) {
+      explanation.push(...socialEngSignals);
+    }
     if (fileAnalysis && fileAnalysis.riskScore >= 45) {
       explanation.push(...fileAnalysis.signals);
     }

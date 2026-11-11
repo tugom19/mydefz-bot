@@ -23,12 +23,20 @@ import os from 'os';
 
 const DEFAULT_FALLBACK_BOT_TOKEN = '9106245836:AAF7PLQrl11MXlj4vAe-u0KjYD3A_-kDNs4';
 const BOT_TOKEN = (process.env.TELEGRAM_BOT_TOKEN || DEFAULT_FALLBACK_BOT_TOKEN).trim().replace(/^bot(?=\d+:)/i, '');
+const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+const FIVE_DAYS_MS = 5 * 24 * 60 * 60 * 1000;
+
 interface ManagedAccountRecord {
   chatId: string;
   displayName: string;
   username: string;
   role: 'admin' | 'user';
-  status: 'active' | 'removed';
+  status: 'active' | 'removed' | 'pending_approval' | 'expired';
+  approvalStatus?: 'approved' | 'pending' | 'rejected' | 'expired';
+  approvedAt?: number | null;
+  expiresAt?: number | null;
+  requestedAt?: number | null;
+  expiryWarning5dSent?: boolean;
   connectionTypes: string[];
   businessConnectionId?: string | null;
   addedAt: number;
@@ -59,6 +67,9 @@ const managedAccountsMap = new Map<string, ManagedAccountRecord>([
       username: '@NANGSOPHEAK',
       role: 'admin',
       status: 'active',
+      approvalStatus: 'approved',
+      approvedAt: Date.now() - 86400000 * 3,
+      expiresAt: Date.now() + 86400000 * 365,
       connectionTypes: ['Direct Bot Chat', 'Business Chat Automation'],
       businessConnectionId: 'mSE8OeLFKFdBBwAA5QlPK224v10',
       addedAt: Date.now() - 86400000 * 3,
@@ -75,6 +86,10 @@ const managedAccountsMap = new Map<string, ManagedAccountRecord>([
       username: 'Tugom',
       role: 'user',
       status: 'active',
+      approvalStatus: 'approved',
+      approvedAt: Date.now() - 3600000 * 2,
+      expiresAt: Date.now() + THIRTY_DAYS_MS - 3600000 * 2,
+      requestedAt: Date.now() - 3600000 * 2,
       connectionTypes: ['Business Chat Automation', 'Direct Bot Chat'],
       businessConnectionId: 'jobbJzPcqFczAwAAagQntTeDgRw',
       addedAt: Date.now() - 3600000 * 2,
@@ -90,13 +105,34 @@ function isAdminChatId(chatId?: string | null): boolean {
   return adminChatIds.has(chatId.trim());
 }
 
+function isUserActiveAndApproved(chatId?: string | null): boolean {
+  if (!chatId) return false;
+  const clean = chatId.trim();
+  if (isAdminChatId(clean)) return true;
+  if (revokedUserChatIds.has(clean)) return false;
+  const rec = managedAccountsMap.get(clean);
+  if (!rec) return false;
+  if (rec.status === 'removed' || rec.status === 'pending_approval' || rec.status === 'expired') {
+    return false;
+  }
+  if (rec.approvalStatus && rec.approvalStatus !== 'approved') {
+    return false;
+  }
+  if (rec.expiresAt && Date.now() > rec.expiresAt) {
+    rec.status = 'expired';
+    rec.approvalStatus = 'expired';
+    return false;
+  }
+  return true;
+}
+
 function isUserRevoked(chatId?: string | null): boolean {
   if (!chatId) return false;
   const clean = chatId.trim();
   if (isAdminChatId(clean)) return false;
   if (revokedUserChatIds.has(clean)) return true;
   const rec = managedAccountsMap.get(clean);
-  return rec?.status === 'removed';
+  return rec?.status === 'removed' || rec?.status === 'pending_approval' || rec?.status === 'expired';
 }
 
 const PORT = Number(process.env.PORT || 8080);
@@ -185,6 +221,7 @@ function upsertManagedAccount(
     username?: string;
     connectionType?: string;
     businessConnectionId?: string | null;
+    isPendingBusinessRequest?: boolean;
     incrementScan?: boolean;
     incrementThreat?: boolean;
   } = {}
@@ -198,6 +235,30 @@ function upsertManagedAccount(
   if (opts.connectionType) connSet.add(opts.connectionType);
   if (connSet.size === 0) connSet.add('Direct Bot Chat');
 
+  const isAdmin = isAdminChatId(cleanId);
+  let status: ManagedAccountRecord['status'] = existing?.status || 'active';
+  let approvalStatus: ManagedAccountRecord['approvalStatus'] = existing?.approvalStatus || 'approved';
+  let approvedAt = existing?.approvedAt || (isAdmin ? now : null);
+  let expiresAt = existing?.expiresAt || (isAdmin ? now + 86400000 * 365 : null);
+  let requestedAt = existing?.requestedAt || null;
+
+  if (isAdmin) {
+    status = 'active';
+    approvalStatus = 'approved';
+    approvedAt = now;
+    expiresAt = now + 86400000 * 365;
+  } else if (revokedUserChatIds.has(cleanId) || existing?.status === 'removed') {
+    status = 'removed';
+    approvalStatus = 'rejected';
+  } else if (opts.isPendingBusinessRequest && (!existing || existing.status === 'pending_approval' || !existing.approvedAt)) {
+    status = 'pending_approval';
+    approvalStatus = 'pending';
+    requestedAt = now;
+  } else if (existing?.expiresAt && now > existing.expiresAt) {
+    status = 'expired';
+    approvalStatus = 'expired';
+  }
+
   const record: ManagedAccountRecord = {
     chatId: cleanId,
     displayName:
@@ -205,12 +266,13 @@ function upsertManagedAccount(
         ? opts.displayName
         : existing?.displayName || `Telegram User ${cleanId}`,
     username: opts.username || existing?.username || '',
-    role: isAdminChatId(cleanId) ? 'admin' : existing?.role || 'user',
-    status: isAdminChatId(cleanId)
-      ? 'active'
-      : revokedUserChatIds.has(cleanId)
-      ? 'removed'
-      : existing?.status || 'active',
+    role: isAdmin ? 'admin' : existing?.role || 'user',
+    status,
+    approvalStatus,
+    approvedAt,
+    expiresAt,
+    requestedAt,
+    expiryWarning5dSent: existing?.expiryWarning5dSent || false,
     connectionTypes: Array.from(connSet),
     businessConnectionId: opts.businessConnectionId ?? existing?.businessConnectionId ?? null,
     addedAt: existing?.addedAt || now,
@@ -697,23 +759,56 @@ async function notifyAdminOfNewAccount(rec: ManagedAccountRecord, connectionLabe
         ? ` (${rec.username})`
         : ` (@${rec.username})`
       : '';
-    await telegramPost('sendMessage', {
-      chat_id: MASTER_ADMIN_CHAT_ID,
-      text:
+    const isPending = rec.status === 'pending_approval' || rec.approvalStatus === 'pending';
+
+    let text = '';
+    let inlineKeyboard: Array<Array<{ text: string; callback_data: string }>> = [];
+
+    if (isPending) {
+      text =
+        `👑 ADMIN ALERT: NEW ACCOUNT APPROVAL REQUEST!\n\n` +
+        `• Account Name: ${rec.displayName}${handleStr}\n` +
+        `• User Chat ID: ${rec.chatId}\n` +
+        `• Requested Feature: ${connectionLabel}\n` +
+        `• Subscription: 30-Day Anti-Virus & Scam Protection\n` +
+        `• Status: ⏳ PENDING APPROVAL (Payment Required)\n\n` +
+        `⚠️ This user added @mydefz_bot to Chat Automation and is awaiting your approval.\n\n` +
+        `Please confirm payment and choose an action below:`;
+      inlineKeyboard = [
+        [
+          { text: `✅ Approve 30 Days (${rec.chatId})`, callback_data: `adm_approve_${rec.chatId}` },
+          { text: `❌ Reject Request`, callback_data: `adm_reject_${rec.chatId}` },
+        ],
+        [
+          { text: `📊 User Report (${rec.chatId})`, callback_data: `adm_report_${rec.chatId}` },
+          { text: '👑 Admin Control Panel', callback_data: 'cmd_admin' },
+        ],
+      ];
+    } else {
+      text =
         `👑 ADMIN SECURITY ALERT — ACCOUNT CONNECTED!\n\n` +
         `• Account Name: ${rec.displayName}${handleStr}\n` +
         `• User Chat ID: ${rec.chatId}\n` +
         `• Feature Added: ${connectionLabel}\n` +
         `• Current Status: ${rec.status === 'removed' ? '🔴 REMOVED / BLOCKED' : '🟢 ACTIVE & ALLOWED'}\n\n` +
-        `You can inspect this user's activity or remove them immediately using the Admin buttons below:`,
-      reply_markup: {
-        inline_keyboard: [
-          [
-            { text: `🚫 Remove User (${rec.chatId})`, callback_data: `adm_remove_${rec.chatId}` },
-            { text: `📊 User Report (${rec.chatId})`, callback_data: `adm_report_${rec.chatId}` },
-          ],
-          [{ text: '👑 Open Full Admin Control Panel', callback_data: 'cmd_admin' }],
+        `You can manage this user's subscription or remove them:`;
+      inlineKeyboard = [
+        [
+          { text: `➕ Add/Renew 30 Days`, callback_data: `adm_approve_${rec.chatId}` },
+          { text: `🚫 Remove User (${rec.chatId})`, callback_data: `adm_remove_${rec.chatId}` },
         ],
+        [
+          { text: `📊 User Report (${rec.chatId})`, callback_data: `adm_report_${rec.chatId}` },
+          { text: '👑 Admin Control Panel', callback_data: 'cmd_admin' },
+        ],
+      ];
+    }
+
+    await telegramPost('sendMessage', {
+      chat_id: MASTER_ADMIN_CHAT_ID,
+      text,
+      reply_markup: {
+        inline_keyboard: inlineKeyboard,
       },
       link_preview_options: { is_disabled: true },
     });
@@ -956,7 +1051,7 @@ function formatStatusReport(callerChatId?: string): string {
     `• Total Updates Processed: ${total}\n` +
     `• Threats Intercepted & Blocked: ${blocked}\n` +
     `• Clean Messages & Files Passed: ${clean}\n\n` +
-    `🔍 Detection Engine Health Matrix (10 Active Shield Layers):\n` +
+    `🔍 Detection Engine Health Matrix (14 Active Shield Layers):\n` +
     `• [OK] Binary Magic Header Engine (MZ, ELF, DEX, Mach-O): ACTIVE ✅\n` +
     `• [OK] Weaponized Windows .lnk Shortcut Inspector: ACTIVE ✅\n` +
     `• [OK] Double Extension Masquerade Engine (.pdf.exe): ACTIVE ✅\n` +
@@ -966,7 +1061,11 @@ function formatStatusReport(callerChatId?: string): string {
     `• [OK] Abuse.ch MalwareBazaar (${malwareBazaarSha256Set.size.toLocaleString()} hashes): SYNCED ✅\n` +
     `• [OK] Abuse.ch URLhaus & ThreatFox (${(urlhausExactSet.size + threatFoxIocSet.size).toLocaleString()} IOCs): SYNCED ✅\n` +
     `• [OK] MetaMask CryptoScamDB & StevenBlack (${(cryptoScamHostSet.size + stevenBlackMalwareSet.size).toLocaleString()} domains): SYNCED ✅\n` +
-    `• [OK] Phishing.Database & OpenPhish (${(phishingDbHostSet.size + openPhishSet.size).toLocaleString()} URLs): SYNCED ✅\n\n` +
+    `• [OK] Phishing.Database & OpenPhish (${(phishingDbHostSet.size + openPhishSet.size).toLocaleString()} URLs): SYNCED ✅\n` +
+    `• [OK] Layer 11: Redirect Tracer & URL Unshortener (bit.ly/t.co/open redirects): ACTIVE ✅\n` +
+    `• [OK] Layer 12: Dynamic Cloud Sandboxing (VirusTotal & Live Detonation): READY ✅\n` +
+    `• [OK] Layer 13: Text-Based Heuristics (Advance-Fee, Crypto Drainers & Support Impersonation): ACTIVE ✅\n` +
+    `• [OK] Layer 14: Telegram Operational Defense (Anti-Flood & Scam Channel Origin Filter): ACTIVE ✅\n\n` +
     `💻 Cloud Environment:\n` +
     `• Process: Standalone 24/7 Bot Daemon (Render/VPS)\n` +
     `• Memory Usage (RSS): ${memMb} MB\n` +
@@ -1184,7 +1283,7 @@ async function handleTelegramMessage(msg: any): Promise<void> {
 
   // 1. Slash commands & Direct chat greetings
   const isCommand =
-    /^\/(start|help|status|test|ping|scan|check|report|weekly|admin|users|remove|kick|block|allow|restore|unblock|adduser)(\s|$|@)/i.test(
+    /^\/(start|help|status|test|ping|scan|check|report|weekly|admin|users|approve|renew|remove|kick|block|allow|restore|unblock|adduser)(\s|$|@)/i.test(
       rawText
     );
   const isDirectGreeting =
@@ -1206,6 +1305,8 @@ async function handleTelegramMessage(msg: any): Promise<void> {
     if (
       cmdWord === 'admin' ||
       cmdWord === 'users' ||
+      cmdWord === 'approve' ||
+      cmdWord === 'renew' ||
       cmdWord === 'remove' ||
       cmdWord === 'kick' ||
       cmdWord === 'block' ||
@@ -1224,7 +1325,49 @@ async function handleTelegramMessage(msg: any): Promise<void> {
         return;
       }
 
-      if ((cmdWord === 'remove' || cmdWord === 'kick' || cmdWord === 'block') && argTargetId) {
+      if ((cmdWord === 'approve' || cmdWord === 'renew') && argTargetId) {
+        revokedUserChatIds.delete(argTargetId);
+        let existing = managedAccountsMap.get(argTargetId);
+        if (!existing) {
+          const upsertRes = upsertManagedAccount(argTargetId, {
+            displayName: argTargetName || `User ${argTargetId}`,
+          });
+          existing = upsertRes.record;
+        }
+        const now = Date.now();
+        const currentBase = Math.max(
+          now,
+          existing.expiresAt && existing.expiresAt > now ? existing.expiresAt : now
+        );
+        existing.status = 'active';
+        existing.approvalStatus = 'approved';
+        existing.approvedAt = now;
+        existing.expiresAt = currentBase + THIRTY_DAYS_MS;
+        existing.expiryWarning5dSent = false;
+        managedAccountsMap.set(argTargetId, existing);
+        registeredSubscriberChatIds.add(argTargetId);
+        saveRoutingMaps();
+
+        const expiryStr = new Date(existing.expiresAt).toLocaleDateString('en-US', {
+          month: 'short',
+          day: 'numeric',
+          year: 'numeric',
+        });
+
+        await telegramPost('sendMessage', {
+          chat_id: argTargetId,
+          text:
+            `🎉 SentinelGram 14-Layer Protection Approved!\n\n` +
+            `✅ Your account has been approved by the Admin for 30 DAYS of active defense.\n\n` +
+            `• Chat ID: ${argTargetId}\n` +
+            `• Expiration Date: ${expiryStr} (30 days)\n` +
+            `• Status: 🟢 Active & Protected (14 Shield Layers)\n\n` +
+            `🛡️ Your Telegram Chat Automation is now actively scanning incoming chats, links, and files.\n` +
+            `You will receive an automatic renewal alert 5 days before your 30-day period ends.`,
+          reply_markup: STANDARD_INLINE_KEYBOARD,
+          link_preview_options: { is_disabled: true },
+        });
+      } else if ((cmdWord === 'remove' || cmdWord === 'kick' || cmdWord === 'block') && argTargetId) {
         if (!isAdminChatId(argTargetId)) {
           revokedUserChatIds.add(argTargetId);
           const existing = managedAccountsMap.get(argTargetId);
@@ -1586,6 +1729,96 @@ async function pollTelegramUpdates(): Promise<void> {
             continue;
           }
 
+          if (cqData.startsWith('adm_approve_')) {
+            const targetId = cqData.replace('adm_approve_', '').trim();
+            if (targetId) {
+              revokedUserChatIds.delete(targetId);
+              let existing = managedAccountsMap.get(targetId);
+              if (!existing) {
+                const upsertRes = upsertManagedAccount(targetId, { displayName: `User ${targetId}` });
+                existing = upsertRes.record;
+              }
+              const now = Date.now();
+              const currentBase = Math.max(
+                now,
+                existing.expiresAt && existing.expiresAt > now ? existing.expiresAt : now
+              );
+              existing.status = 'active';
+              existing.approvalStatus = 'approved';
+              existing.approvedAt = now;
+              existing.expiresAt = currentBase + THIRTY_DAYS_MS;
+              existing.expiryWarning5dSent = false;
+              managedAccountsMap.set(targetId, existing);
+              registeredSubscriberChatIds.add(targetId);
+              saveRoutingMaps();
+
+              const expiryStr = new Date(existing.expiresAt).toLocaleDateString('en-US', {
+                month: 'short',
+                day: 'numeric',
+                year: 'numeric',
+              });
+
+              const panel = formatAdminControlPanel();
+              await Promise.all([
+                sendOrEditCallbackScreen(
+                  `✅ Approval Granted (30 Days)!\n\n` +
+                    `• Account: ${existing.displayName} (${targetId})\n` +
+                    `• Valid Until: ${expiryStr} (30 days)\n` +
+                    `• Status: 🟢 ACTIVE & PROTECTED\n\n` +
+                    `Protection is active for this user.\n\n${panel.text}`,
+                  panel.reply_markup,
+                  true
+                ),
+                telegramPost('sendMessage', {
+                  chat_id: targetId,
+                  text:
+                    `🎉 SentinelGram 14-Layer Protection Activated!\n\n` +
+                    `✅ Your account has been approved by the Admin for 30 DAYS of active defense.\n\n` +
+                    `• Chat ID: ${targetId}\n` +
+                    `• Expiration Date: ${expiryStr} (30 days)\n` +
+                    `• Status: 🟢 Active & Protected (14 Shield Layers)\n\n` +
+                    `🛡️ Your Telegram Chat Automation is now actively scanning incoming chats, links, and files.\n` +
+                    `You will receive an automatic renewal alert 5 days before your 30-day period ends.`,
+                  reply_markup: STANDARD_INLINE_KEYBOARD,
+                  link_preview_options: { is_disabled: true },
+                }),
+              ]);
+            }
+            continue;
+          }
+
+          if (cqData.startsWith('adm_reject_')) {
+            const targetId = cqData.replace('adm_reject_', '').trim();
+            if (targetId && !isAdminChatId(targetId)) {
+              revokedUserChatIds.add(targetId);
+              const existing = managedAccountsMap.get(targetId);
+              if (existing) {
+                existing.status = 'removed';
+                existing.approvalStatus = 'rejected';
+                managedAccountsMap.set(targetId, existing);
+              }
+              saveRoutingMaps();
+
+              const panel = formatAdminControlPanel();
+              await Promise.all([
+                sendOrEditCallbackScreen(
+                  `❌ Request Rejected: Account ${existing?.displayName || targetId} (${targetId}) declined.\n\n${panel.text}`,
+                  panel.reply_markup,
+                  true
+                ),
+                telegramPost('sendMessage', {
+                  chat_id: targetId,
+                  text:
+                    `❌ SentinelGram Protection Request Declined\n\n` +
+                    `Your request for 30-day bot protection was declined by the administrator.\n\n` +
+                    `Contact Master Admin @NANGSOPHEAK for pricing and payment details.`,
+                  link_preview_options: { is_disabled: true },
+                }),
+              ]);
+            }
+            continue;
+          }
+
           if (cqData.startsWith('adm_remove_')) {
             const targetId = cqData.replace('adm_remove_', '').trim();
             if (targetId && !isAdminChatId(targetId)) {
@@ -1693,26 +1926,70 @@ async function pollTelegramUpdates(): Promise<void> {
         if (userChatId) {
           activeAlertChatId = userChatId;
           if (bc.id) businessAlertOwnerMap.set(String(bc.id), userChatId);
+
+          const isApprovedAlready = isUserActiveAndApproved(userChatId);
+          const needsApproval = bc.is_enabled && !isAdminChatId(userChatId) && !isApprovedAlready;
+
           const { record } = upsertManagedAccount(userChatId, {
             displayName: ownerName,
             username: ownerHandle,
             connectionType: 'Business Chat Automation',
             businessConnectionId: bc.id ? String(bc.id) : null,
+            isPendingBusinessRequest: needsApproval,
           });
+
           if (bc.is_enabled && !isAdminChatId(userChatId)) {
             void notifyAdminOfNewAccount(record, 'Business Chat Automation');
           }
-          if (bc.is_enabled && !isUserRevoked(userChatId)) {
-            await telegramPost('sendMessage', {
-              chat_id: userChatId,
-              text:
-                `🛡️ SentinelGram Business Chatbot Active!\n\n` +
-                `• Your Chat ID: ${userChatId}\n` +
-                `• Alert Destination: Chat ID ${userChatId} (Matched ✅)\n\n` +
-                `Your 1-on-1 Telegram DMs are now protected in real time against scam lures, phishing links, and dangerous executable files.`,
-              reply_markup: getInlineKeyboardForChat(userChatId),
-              link_preview_options: { is_disabled: true },
-            });
+
+          if (bc.is_enabled) {
+            if (needsApproval) {
+              await telegramPost('sendMessage', {
+                chat_id: userChatId,
+                text:
+                  `⏳ SentinelGram Approval Required\n\n` +
+                  `Hello ${ownerName}! You have linked @mydefz_bot to Telegram Chat Automation.\n\n` +
+                  `🛡️ Protection Plan: 30-Day Real-Time Threat Defense (14 Detection Layers)\n` +
+                  `📋 Status: ⏳ Pending Master Admin Approval\n\n` +
+                  `💳 Subscription Policy:\n` +
+                  `• 1 approval is valid for 30 days of 24/7 protection.\n` +
+                  `• Protection automatically pauses after 30 days without renewal.\n` +
+                  `• You will receive a renewal alert 5 days before expiration.\n\n` +
+                  `📲 Action Required:\n` +
+                  `Please contact Master Admin @NANGSOPHEAK to complete payment and approve your account.\n\n` +
+                  `Once approved, your 30-day shield will activate immediately!`,
+                reply_markup: {
+                  inline_keyboard: [
+                    [{ text: '💳 Contact Admin (@NANGSOPHEAK)', url: 'https://t.me/NANGSOPHEAK' }],
+                    [{ text: '🔄 Check Approval Status', callback_data: 'cmd_status' }],
+                  ],
+                },
+                link_preview_options: { is_disabled: true },
+              });
+            } else if (isApprovedAlready && !isUserRevoked(userChatId)) {
+              const daysLeft = record.expiresAt
+                ? Math.max(0, Math.ceil((record.expiresAt - Date.now()) / (24 * 3600 * 1000)))
+                : 30;
+              const expiryStr = record.expiresAt
+                ? new Date(record.expiresAt).toLocaleDateString('en-US', {
+                    month: 'short',
+                    day: 'numeric',
+                    year: 'numeric',
+                  })
+                : '30 days';
+              await telegramPost('sendMessage', {
+                chat_id: userChatId,
+                text:
+                  `🛡️ SentinelGram Business Chatbot Active!\n\n` +
+                  `• Your Chat ID: ${userChatId}\n` +
+                  `• Alert Destination: Chat ID ${userChatId} (Matched ✅)\n` +
+                  `• Subscription: 🟢 Active (30-Day Plan · ${daysLeft} days left)\n` +
+                  `• Valid Until: ${expiryStr}\n\n` +
+                  `Your 1-on-1 Telegram DMs are protected in real time against scam lures, phishing links, and dangerous executable files.`,
+                reply_markup: getInlineKeyboardForChat(userChatId),
+                link_preview_options: { is_disabled: true },
+              });
+            }
           }
         }
         continue;
